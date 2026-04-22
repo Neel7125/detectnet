@@ -459,7 +459,7 @@ function goServer(){ S.mode='server'; show('srvScr'); initServer(); }
 function goClient(){ S.mode='client'; show('cliScr'); initClient(); }
 
 function cleanup(){
-  clearInterval(S.capTimer); clearInterval(S.healthTimer);
+  clearInterval(S.capTimer); clearInterval(S.healthTimer); clearInterval(S._pingTimer);
   stopStream();
   if(S.ws){ try{S.ws.close();}catch(e){} }
   Object.assign(S,{
@@ -517,6 +517,14 @@ function connectWS(onOpen, onMsg, onClose){
   ws.onerror   = e =>{ console.error('[WS] error',e); };
   return ws;
 }
+
+// Keepalive ping — prevents Railway/Render from closing idle WS connections
+function startWSPing(){
+  clearInterval(S._pingTimer);
+  S._pingTimer = setInterval(()=>{
+    wsSend({ type:'ping' });
+  }, 20000);
+}
 // ══════════════════════════════════════════════════════════════════
 //  SERVER — INIT (WebSocket)
 // ══════════════════════════════════════════════════════════════════
@@ -528,6 +536,7 @@ function initServer(){
   connectWS(
     // onOpen
     (ws)=>{
+      startWSPing();
       wsSend({ type:'host-create', code:S.code, clientId:S.myId });
     },
     // onMessage
@@ -638,6 +647,7 @@ function joinSession(){
   connectWS(
     // onOpen
     ()=>{
+      startWSPing();
       wsSend({ type:'client-join', code:S.code, clientId:S.myId });
     },
     // onMessage
@@ -655,8 +665,9 @@ function joinSession(){
         updateHealth();
       }
       if(msg.type==='error'){
+        console.error('[Client] server error:', msg.msg);
         toast(msg.msg||'Connection error'); resetJoin();
-        setStatus('c','Error: '+msg.msg,'r');
+        setStatus('c',msg.msg||'Error','r');
       }
       if(msg.type==='frame')  handleFrame(msg);
       if(msg.type==='stats')  renderStats(msg.stats,'cResTbody','cResSec');

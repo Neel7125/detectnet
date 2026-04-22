@@ -39,6 +39,9 @@ wss.on('connection', (ws) => {
   ws._id = null;
   ws._code = null;
   ws._role = null; // 'host' | 'client'
+  ws.isAlive = true;
+
+  ws.on('pong', () => { ws.isAlive = true; });
 
   ws.on('message', (raw) => {
     let msg;
@@ -89,8 +92,9 @@ wss.on('connection', (ws) => {
     if (type === 'frame') {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'host') return;
-      const targetWs = session.clients.get(data.to);
-      if (targetWs) send(targetWs, { type: 'frame', ts: data.ts, jpg: data.jpg, fw: data.fw, fh: data.fh });
+      const d = data || {};
+      const targetWs = session.clients.get(d.to);
+      if (targetWs) send(targetWs, { type: 'frame', ts: d.ts, jpg: d.jpg, fw: d.fw, fh: d.fh });
       return;
     }
 
@@ -98,7 +102,9 @@ wss.on('connection', (ws) => {
     if (type === 'result') {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'client') return;
-      send(session.hostWs, { type: 'result', from: ws._id, ts: data.ts, dets: data.dets, fw: data.fw, fh: data.fh });
+      // payload is in data.* (nested)
+      const d = data || {};
+      send(session.hostWs, { type: 'result', from: ws._id, ts: d.ts, dets: d.dets, fw: d.fw, fh: d.fh });
       return;
     }
 
@@ -106,7 +112,8 @@ wss.on('connection', (ws) => {
     if (type === 'health') {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'client') return;
-      send(session.hostWs, { type: 'health', from: ws._id, h: data.h });
+      const d = data || {};
+      send(session.hostWs, { type: 'health', from: ws._id, h: d.h });
       return;
     }
 
@@ -114,7 +121,8 @@ wss.on('connection', (ws) => {
     if (type === 'stats') {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'host') return;
-      for (const cws of session.clients.values()) send(cws, { type: 'stats', stats: data.stats });
+      const d = data || {};
+      for (const cws of session.clients.values()) send(cws, { type: 'stats', stats: d.stats });
       return;
     }
 
@@ -122,8 +130,15 @@ wss.on('connection', (ws) => {
     if (type === 'cfg') {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'host') return;
-      const targetWs = session.clients.get(data.to);
-      if (targetWs) send(targetWs, { type: 'cfg', sched: data.sched });
+      const d = data || {};
+      const targetWs = session.clients.get(d.to);
+      if (targetWs) send(targetWs, { type: 'cfg', sched: d.sched });
+      return;
+    }
+
+    // ── PING: keepalive ───────────────────────────────────────
+    if (type === 'ping') {
+      send(ws, { type: 'pong' });
       return;
     }
   });
@@ -149,3 +164,13 @@ wss.on('connection', (ws) => {
 });
 
 httpServer.listen(PORT, () => console.log(`DetectNet WS server running on port ${PORT}`));
+
+// Heartbeat — ping all clients every 25s, drop dead connections
+// Also prevents Railway/Render from sleeping the server
+const heartbeat = setInterval(() => {
+  wss.clients.forEach(ws => {
+    if (!ws.isAlive) { ws.terminate(); return; }
+    ws.isAlive = false;
+    ws.ping();
+  });
+}, 25000);
