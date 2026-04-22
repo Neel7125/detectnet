@@ -541,6 +541,7 @@ function initServer(){
     },
     // onMessage
     (msg)=>{
+      console.log('[Host] msg:', msg.type, msg.clientId||'');
       if(msg.type==='host-ready'){
         $('sCode').textContent=S.code; $('sCode').classList.remove('pend');
         $('sHint').textContent='Share this code with clients';
@@ -652,6 +653,7 @@ function joinSession(){
     },
     // onMessage
     (msg)=>{
+      console.log('[Client] msg:', msg.type);
       if(msg.type==='joined'){
         $('cDot').className='dot g';
         $('joinBtn').textContent='Connected ✓';
@@ -692,12 +694,16 @@ function disconnectClient(){
 
 async function handleFrame(data){
   $('cNoVid').style.display='none';
+  if(!data.jpg){ console.warn('[frame] no jpg in frame'); return; }
   const img=new Image();
+  img.onerror = ()=>{ console.error('[frame] img failed to load'); };
   img.onload=async()=>{
     const cv=$('cliCanvas'); cv.width=img.width; cv.height=img.height;
     const ctx=cv.getContext('2d'); ctx.drawImage(img,0,0);
     let dets=[];
-    try{ dets=await S.model.detect(img); }catch(e){}
+    if(S.model){
+      try{ dets=await S.model.detect(img); }catch(e){ console.error('[frame] detect error',e); }
+    }
     const lat=Date.now()-data.ts;
     dets.forEach(d=>{
       const[x,y,bw,bh]=d.bbox;
@@ -714,7 +720,6 @@ async function handleFrame(data){
     $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
-    // Send result back to host via WS
     wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
   };
   img.src=data.jpg;
@@ -979,9 +984,12 @@ function startCapture(){
   S.capTimer=setInterval(()=>{
     if(!Object.keys(S.clients).length) return;
     const v=$('srvVid'); if(!v.videoWidth) return;
-    tmp.width=S.res.w; tmp.height=S.res.h;
+    // Use 480p max for relay — keeps frames under ~80KB base64
+    tmp.width=Math.min(S.res.w,854); tmp.height=Math.min(S.res.h,480);
     tmp.getContext('2d').drawImage(v,0,0,tmp.width,tmp.height);
-    dispatch(tmp.toDataURL('image/jpeg',.6),tmp.width,tmp.height);
+    const jpg=tmp.toDataURL('image/jpeg',.5);
+    console.log('[Host] dispatching frame, size:', Math.round(jpg.length/1024)+'KB, clients:', Object.keys(S.clients).length);
+    dispatch(jpg,tmp.width,tmp.height);
   },CAPTURE_MS);
 }
 function loadVideo(inp){

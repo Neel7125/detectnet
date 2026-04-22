@@ -19,7 +19,7 @@ const httpServer = createServer((req, res) => {
   res.end('DetectNet WS Server OK');
 });
 
-const wss = new WebSocketServer({ server: httpServer });
+const wss = new WebSocketServer({ server: httpServer, maxPayload: 10 * 1024 * 1024 }); // 10MB max
 
 function send(ws, obj) {
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -90,11 +90,14 @@ wss.on('connection', (ws) => {
 
     // ── FRAME: host → specific client (SFU relay) ────────────
     if (type === 'frame') {
-      const session = sessions.get(ws._code);
-      if (!session || ws._role !== 'host') return;
+      const sessionCode = ws._code || code;
+      const session = sessions.get(sessionCode);
+      if (!session) { console.log('[frame] no session for code:', sessionCode, 'ws._code:', ws._code); return; }
+      if (ws._role !== 'host') { console.log('[frame] sender is not host, role:', ws._role); return; }
       const d = data || {};
       const targetWs = session.clients.get(d.to);
-      if (targetWs) send(targetWs, { type: 'frame', ts: d.ts, jpg: d.jpg, fw: d.fw, fh: d.fh });
+      if (!targetWs) { console.log('[frame] target client not found:', d.to, 'clients:', [...session.clients.keys()]); return; }
+      send(targetWs, { type: 'frame', ts: d.ts, jpg: d.jpg, fw: d.fw, fh: d.fh });
       return;
     }
 
