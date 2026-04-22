@@ -412,39 +412,32 @@ body{color:var(--txt);font-family:var(--disp)}
 <script>
 'use strict';
 // ══════════════════════════════════════════════════════════════════
-//  DetectNet Pro  ·  Vercel-ready
-//  Signaling: /api/signal (serverless, long-poll)
-//  Data:      WebRTC DataChannel  (STUN + free TURN = cross-network)
-//  No external services required beyond the Vercel deployment.
+//  DetectNet Pro — WebSocket relay (no WebRTC P2P, no polling)
+//  All data flows through the WS server: signaling + frames + results
+//  Deploy server.js on Railway/Render, set WS_URL below.
 // ══════════════════════════════════════════════════════════════════
+
+// ▼▼▼ SET THIS to your Railway/Render WebSocket server URL ▼▼▼
+const WS_URL = 'wss://YOUR-SERVER.railway.app';
+// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 const POWER_W    = 15;
 const CAPTURE_MS = 220;
 const RES = { '240':{w:426,h:240}, '480':{w:854,h:480}, '720':{w:1280,h:720} };
 
-// ICE servers — STUN only for same-WiFi LAN (direct connection, no relay needed)
-// TURN would only be needed for different networks; free TURN servers are unreliable
-const ICE = [
-  {urls:'stun:stun.l.google.com:19302'},
-  {urls:'stun:stun1.l.google.com:19302'},
-];
-
 // ── STATE ─────────────────────────────────────────────────────────
 const S = {
   mode:null, myId:null, code:null,
   // server
-  peers:{},     // clientId -> RTCPeerConnection
-  chans:{},     // clientId -> RTCDataChannel
-  clients:{},   // clientId -> metadata
+  ws:null,          // WebSocket connection
+  clients:{},       // clientId -> metadata
   vidMode:'live', sched:'greedy', res:RES['480'],
   stream:null, capTimer:null,
   sent:0, totalDet:0, lats:[], sessStart:0,
   recording:false, mr:null, recChunks:[], recBlob:null,
-  pollTimer:null, pollSince:0,
   // client
   model:null, modelOk:false,
-  srvPC:null, srvChan:null,
-  frDone:0, objFound:0, cliLats:[], cliEnergy:0, cliStart:0,
+  frDone:0, objFound:0, cliLats:[], cliEnergySum:0, cliStart:0,
   healthTimer:null,
 };
 
@@ -466,22 +459,19 @@ function goServer(){ S.mode='server'; show('srvScr'); initServer(); }
 function goClient(){ S.mode='client'; show('cliScr'); initClient(); }
 
 function cleanup(){
-  clearInterval(S.capTimer); clearInterval(S.healthTimer); clearInterval(S.pollTimer);
+  clearInterval(S.capTimer); clearInterval(S.healthTimer);
   stopStream();
-  Object.values(S.peers).forEach(pc=>{ try{pc.close();}catch(e){} });
-  if(S.srvPC){ try{S.srvPC.close();}catch(e){} }
+  if(S.ws){ try{S.ws.close();}catch(e){} }
   Object.assign(S,{
-    peers:{},chans:{},clients:{},stream:null,capTimer:null,_iceBuf:{},
+    ws:null, clients:{}, stream:null, capTimer:null,
     sent:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
-    srvPC:null,srvChan:null,frDone:0,objFound:0,cliLats:[],cliEnergy:0,cliEnergySum:0,
-    pollTimer:null,pollSince:0,myId:null,code:null,
+    frDone:0,objFound:0,cliLats:[],cliEnergySum:0,
+    myId:null,code:null,
   });
 }
 
 function refreshServer(){
-  // Tear down current session and start a fresh one
   cleanup();
-  // Reset UI
   $('sCode').textContent='------'; $('sCode').className='scode pend';
   $('sHint').textContent='Connecting...'; $('cpyBtn').style.display='none';
   $('sDot').className='dot'; $('sCliList').innerHTML=''; $('sDetList').innerHTML='';
@@ -492,14 +482,11 @@ function refreshServer(){
 }
 
 function refreshClient(){
-  // Tear down current connection and reset client UI
-  const wasConnected=!!S.srvChan;
-  clearInterval(S.pollTimer); clearInterval(S.healthTimer);
-  if(S.srvChan){ try{S.srvChan.close();}catch(e){} S.srvChan=null; }
-  if(S.srvPC){ try{S.srvPC.close();}catch(e){} S.srvPC=null; }
+  const wasConnected=!!(S.ws && S.ws.readyState===WebSocket.OPEN && S.mode==='client');
+  clearInterval(S.healthTimer);
+  if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
   Object.assign(S,{
-    srvPC:null,srvChan:null,frDone:0,objFound:0,cliLats:[],cliEnergy:0,cliEnergySum:0,
-    pollTimer:null,pollSince:0,myId:null,code:null,cliStart:0,
+    ws:null, frDone:0, objFound:0, cliLats:[], cliEnergySum:0, myId:null, code:null, cliStart:0,
   });
   $('cDot').className='dot'; $('discBtn').style.display='none';
   $('cVidSec').style.display='none'; $('cStatSec').style.display='none';
@@ -514,159 +501,103 @@ function refreshClient(){
 }
 function stopStream(){ if(S.stream){ S.stream.getTracks().forEach(t=>t.stop()); S.stream=null; } }
 
-// ── SIGNALING via /api/signal ──────────────────────────────────────
-async function sig(action, data={}){
-  try{
-    const res = await fetch('/api/signal', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({ action, code:S.code, clientId:S.myId, data })
-    });
-    return await res.json();
-  }catch(e){ console.error('[sig]',e); return {ok:false}; }
+// ── WebSocket connection ───────────────────────────────────────────
+function wsSend(obj){
+  if(S.ws && S.ws.readyState===WebSocket.OPEN){
+    try{ S.ws.send(JSON.stringify(obj)); }catch(e){}
+  }
 }
 
-async function sigPost(to, type, payload){
-  await sig('post',{ to, type, payload });
+function connectWS(onOpen, onMsg, onClose){
+  const ws = new WebSocket(WS_URL);
+  S.ws = ws;
+  ws.onopen    = ()=>{ console.log('[WS] connected'); onOpen(ws); };
+  ws.onmessage = ev=>{ try{ onMsg(JSON.parse(ev.data)); }catch(e){} };
+  ws.onclose   = ()=>{ console.log('[WS] closed'); onClose(); };
+  ws.onerror   = e =>{ console.error('[WS] error',e); };
+  return ws;
 }
-
-// Wait for ICE gathering to complete, then return the full local description
-// with all candidates embedded — no trickle ICE, no race conditions
-function waitForICE(pc){
-  return new Promise(resolve=>{
-    if(pc.iceGatheringState==='complete'){ resolve(pc.localDescription); return; }
-    const check = ()=>{
-      if(pc.iceGatheringState==='complete'){
-        pc.removeEventListener('icegatheringstatechange', check);
-        resolve(pc.localDescription);
-      }
-    };
-    pc.addEventListener('icegatheringstatechange', check);
-    // Safety timeout — resolve with whatever we have after 4s
-    setTimeout(()=>{ pc.removeEventListener('icegatheringstatechange', check); resolve(pc.localDescription); }, 4000);
-  });
-}
-
-function startPolling(handler){
-  S.pollSince = Date.now() - 1000;
-  let polling = false;
-  S.pollTimer = setInterval(async()=>{
-    if(polling) return;
-    polling = true;
-    try{
-      const r = await fetch(`/api/signal?action=poll&code=${S.code}&clientId=${S.myId}&since=${S.pollSince}`);
-      const json = await r.json();
-      if(json.ok){
-        S.pollSince = json.ts || Date.now();
-        for(const m of (json.msgs||[])) await handler(m);
-      }
-    }catch(e){}
-    polling = false;
-  }, 600);
-}
-
 // ══════════════════════════════════════════════════════════════════
-//  SERVER — INIT
+//  SERVER — INIT (WebSocket)
 // ══════════════════════════════════════════════════════════════════
-async function initServer(){
+function initServer(){
   S.myId = 'host-'+uid();
   S.code = genCode();
-  setStatus('s','Creating session...','b');
+  setStatus('s','Connecting to server...','b');
 
-  const r = await sig('create');
-  if(!r.ok){ toast('Failed to create session. Retrying...'); setTimeout(initServer,2000); return; }
-
-  $('sCode').textContent = S.code;
-  $('sCode').classList.remove('pend');
-  $('sHint').textContent = 'Share this code with clients';
-  $('cpyBtn').style.display = 'inline-flex';
-  $('sDot').className = 'dot g';
-  setStatus('s','Session live · waiting for clients','g');
-  toast('Session ready! Code: '+S.code);
-
-  // Poll for signaling messages from clients
-  startPolling(async msg=>{
-    if(msg.type==='join')         await onClientJoin(msg.from);
-    if(msg.type==='answer')       await onClientAnswer(msg.from, msg.payload);
-    if(msg.type==='ice_client')   await onClientIce(msg.from, msg.payload);
-  });
+  connectWS(
+    // onOpen
+    (ws)=>{
+      wsSend({ type:'host-create', code:S.code, clientId:S.myId });
+    },
+    // onMessage
+    (msg)=>{
+      if(msg.type==='host-ready'){
+        $('sCode').textContent=S.code; $('sCode').classList.remove('pend');
+        $('sHint').textContent='Share this code with clients';
+        $('cpyBtn').style.display='inline-flex';
+        $('sDot').className='dot g';
+        setStatus('s','Session live · waiting for clients','g');
+        toast('Session ready! Code: '+S.code);
+      }
+      if(msg.type==='client-joined') onClientJoined(msg.clientId);
+      if(msg.type==='client-left')   onClientDrop(msg.clientId);
+      if(msg.type==='result')        onClientResult(msg.from, msg);
+      if(msg.type==='health')        onClientHealth(msg.from, msg.h);
+    },
+    // onClose
+    ()=>{
+      $('sDot').className='dot r';
+      setStatus('s','Server disconnected — tap ↺ to reconnect','r');
+    }
+  );
 }
 
-async function onClientJoin(clientId){
-  if(S.peers[clientId]) return; // deduplicate
-  console.log('[Host] Client joining:', clientId);
-
-  const pc = new RTCPeerConnection({iceServers:ICE});
-  S.peers[clientId] = pc;
-
-  const dc = pc.createDataChannel('det',{ordered:true});
-  S.chans[clientId] = dc;
-
-  dc.onopen = ()=>{
-    console.log('[Host] DC open:', clientId);
-    const n = Object.keys(S.clients).length+1;
-    S.clients[clientId]={ name:'Client '+n, health:{battery:100,cpu:50,throughput:50,fps:0}, frames:0, dets:0, lats:[], pend:0 };
-    updateCliCount(); addClientUI(clientId);
-    dcSend(clientId,{t:'cfg',sched:S.sched});
-    toast('Client '+n+' connected!');
-    setStatus('s',Object.keys(S.clients).length+' client(s) connected','g');
-  };
-  dc.onmessage = ev=>{ try{ handleClientData(clientId,JSON.parse(ev.data)); }catch(e){} };
-  dc.onclose   = ()=>{ onClientDrop(clientId); };
-  pc.onconnectionstatechange = ()=>console.log('[Host] PC state',clientId,pc.connectionState);
-
-  // Create offer, wait for ALL ICE candidates to be gathered, then send complete SDP
-  await pc.setLocalDescription(await pc.createOffer());
-  const fullDesc = await waitForICE(pc);
-  await sigPost(clientId, 'offer', fullDesc);
-  console.log('[Host] Offer sent with full ICE to', clientId);
-}
-
-async function onClientAnswer(clientId, sdp){
-  const pc = S.peers[clientId]; if(!pc) return;
-  try{
-    // Answer already has all ICE candidates embedded — just set it
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    console.log('[Host] Remote desc set for', clientId);
-  }catch(e){ console.error('[Host] setRemote answer',e); }
-}
-
-async function onClientIce(clientId, candidate){
-  // No-op — we use full ICE gathering, not trickle ICE
-  // Kept for backwards compat in case old clients send candidates
-  const pc = S.peers[clientId]; if(!pc||!pc.remoteDescription) return;
-  await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(()=>{});
+function onClientJoined(clientId){
+  const n = Object.keys(S.clients).length+1;
+  S.clients[clientId]={ name:'Client '+n, health:{battery:100,cpu:50,throughput:50,fps:0}, frames:0, dets:0, lats:[], pend:0 };
+  updateCliCount(); addClientUI(clientId);
+  // Send config to this client
+  wsSend({ type:'cfg', code:S.code, clientId:S.myId, data:{ to:clientId, sched:S.sched } });
+  toast('Client '+n+' connected!');
+  setStatus('s',Object.keys(S.clients).length+' client(s) connected','g');
 }
 
 function onClientDrop(clientId){
-  delete S.peers[clientId]; delete S.chans[clientId]; delete S.clients[clientId];
+  delete S.clients[clientId];
   updateCliCount();
   $('cli-'+sid(clientId))?.remove();
   toast('Client disconnected');
 }
 
-function dcSend(clientId, obj){
-  const dc=S.chans[clientId];
-  if(dc?.readyState==='open'){ try{ dc.send(JSON.stringify(obj)); }catch(e){} }
+function onClientResult(clientId, msg){
+  const cli=S.clients[clientId]; if(!cli) return;
+  const lat=Date.now()-msg.ts;
+  cli.frames++; cli.dets+=msg.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
+  S.totalDet+=msg.dets.length; S.lats.push(lat);
+  updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
+  if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
+  updateSrvStats();
+  const stats=buildStats();
+  wsSend({ type:'stats', code:S.code, clientId:S.myId, data:{ stats } });
 }
 
-function handleClientData(id,data){
-  const cli=S.clients[id]; if(!cli) return;
-  if(data.t==='health'){ cli.health={...cli.health,...data.h}; updateClientUI(id); return; }
-  if(data.t==='result'){
-    const lat=Date.now()-data.ts;
-    cli.frames++; cli.dets+=data.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
-    S.totalDet+=data.dets.length; S.lats.push(lat);
-    updateCliCount(); updateClientUI(id); renderSrvDets(data.dets);
-    if(data.dets.length) drawSrvBoxes(data.dets,data.fw,data.fh);
-    updateSrvStats();
-    const stats=buildStats();
-    Object.keys(S.chans).forEach(cid=>dcSend(cid,{t:'stats',stats}));
-  }
+function onClientHealth(clientId, h){
+  const cli=S.clients[clientId]; if(!cli) return;
+  cli.health={...cli.health,...h}; updateClientUI(clientId);
+}
+
+// dispatch a frame to a chosen client via WS relay
+function dispatch(jpg,fw,fh){
+  const id=pickClient(); if(!id) return;
+  const ts=Date.now();
+  wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts } });
+  S.sent++; if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
+  $('sFrSent').textContent=S.sent;
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  CLIENT — INIT & JOIN
+//  CLIENT — INIT & JOIN (WebSocket)
 // ══════════════════════════════════════════════════════════════════
 async function initClient(){
   startHealthReporting();
@@ -691,143 +622,96 @@ async function loadModel(){
   }
 }
 
-function resetJoin(){ $('joinBtn').disabled=false; $('joinBtn').textContent='Connect to Session'; }
+function resetJoin(){ $('joinBtn').disabled=!S.modelOk; $('joinBtn').textContent='Connect to Session'; }
 
-async function joinSession(){
+function joinSession(){
   const code=$('codeInp').value.trim().toUpperCase();
   if(code.length!==6){ toast('Enter 6-character code'); return; }
   if(!S.modelOk){ toast('Model still loading...'); return; }
 
   $('joinBtn').disabled=true; $('joinBtn').textContent='Connecting...';
-  $('cDot').className='dot b'; setStatus('c','Connecting...','b');
+  $('cDot').className='dot b'; setStatus('c','Connecting to server...','b');
 
   S.myId = 'cli-'+uid();
   S.code = code;
 
-  // Retry sig('join') up to 3 times
-  let r={ok:false};
-  for(let attempt=0;attempt<3;attempt++){
-    r = await sig('join');
-    if(r.ok) break;
-    if(attempt<2){ await sleep(1000); setStatus('c','Retrying... ('+(attempt+2)+'/3)','b'); }
-  }
-  if(!r.ok){ toast(r.error||'Session not found. Check the code.'); resetJoin(); setStatus('c','Connection failed','r'); return; }
-
-  const hostId = r.hostId;
-  let connTimeout;
-  let offerHandled = false;
-
-  const pc = new RTCPeerConnection({iceServers:ICE});
-  S.srvPC = pc;
-
-  pc.ondatachannel = ev=>{
-    const dc = ev.channel;
-    S.srvChan = dc;
-    dc.onopen = ()=>{
-      clearTimeout(connTimeout);
-      console.log('[Client] DC open!');
-      $('cDot').className='dot g';
-      $('joinBtn').textContent='Connected ✓';
-      $('discBtn').style.display='block';
-      $('cVidSec').style.display='block';
-      $('cStatSec').style.display='block';
-      $('cDetSec').style.display='block';
-      S.cliStart=Date.now();
-      S.cliEnergySum=0;
-      setStatus('c','Connected — receiving frames','g');
-      toast('Connected! Waiting for frames...');
-      updateHealth();
-    };
-    dc.onmessage = ev2=>{ try{ handleSrvMsg(JSON.parse(ev2.data)); }catch(e){} };
-    dc.onclose   = ()=>{ $('cDot').className='dot r'; setStatus('c','Session ended','r'); resetJoin(); $('discBtn').style.display='none'; };
-  };
-
-  pc.onconnectionstatechange = ()=>{
-    console.log('[Client] PC state:',pc.connectionState);
-    if(pc.connectionState==='failed'){
-      clearTimeout(connTimeout);
-      toast('Connection failed — tap ↺ to retry',4000);
-      setStatus('c','Connection failed — tap ↺ to retry','r');
-    }
-    if(pc.connectionState==='disconnected'){
-      setStatus('c','Connection lost...','b');
-    }
-  };
-
-  connTimeout = setTimeout(()=>{
-    toast('No offer from host — tap ↺ to retry',4000);
-    resetJoin(); setStatus('c','Timeout — tap ↺ to retry','r');
-  }, 20000);
-
-  // Start polling BEFORE announcing join
-  startPolling(async msg=>{
-    if(msg.type==='offer' && !offerHandled){
-      offerHandled = true;
-      clearTimeout(connTimeout);
-      setStatus('c','Got offer — gathering ICE...','b');
-      try{
-        // Set remote description (offer has full ICE from host)
-        await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
-        // Create answer and wait for ALL our ICE candidates before sending
-        await pc.setLocalDescription(await pc.createAnswer());
-        const fullAnswer = await waitForICE(pc);
-        await sigPost(hostId,'answer', fullAnswer);
-        console.log('[Client] Full answer sent');
-        setStatus('c','Answer sent — connecting...','b');
-      }catch(e){
-        console.error('[Client] offer handling error',e);
-        toast('Handshake error — tap ↺ to retry',4000);
-        setStatus('c','Error — tap ↺ to retry','r');
+  connectWS(
+    // onOpen
+    ()=>{
+      wsSend({ type:'client-join', code:S.code, clientId:S.myId });
+    },
+    // onMessage
+    (msg)=>{
+      if(msg.type==='joined'){
+        $('cDot').className='dot g';
+        $('joinBtn').textContent='Connected ✓';
+        $('discBtn').style.display='block';
+        $('cVidSec').style.display='block';
+        $('cStatSec').style.display='block';
+        $('cDetSec').style.display='block';
+        S.cliStart=Date.now(); S.cliEnergySum=0;
+        setStatus('c','Connected — receiving frames','g');
+        toast('Connected! Waiting for frames...');
+        updateHealth();
       }
+      if(msg.type==='error'){
+        toast(msg.msg||'Connection error'); resetJoin();
+        setStatus('c','Error: '+msg.msg,'r');
+      }
+      if(msg.type==='frame')  handleFrame(msg);
+      if(msg.type==='stats')  renderStats(msg.stats,'cResTbody','cResSec');
+      if(msg.type==='cfg')    return; // sched config, ignore on client
+      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; }
+    },
+    // onClose
+    ()=>{
+      $('cDot').className='dot r';
+      setStatus('c','Disconnected — tap ↺ to retry','r');
+      resetJoin(); $('discBtn').style.display='none';
     }
-    // No need to handle ice_host — full ICE is embedded in the offer
-  });
-
-  // Announce join AFTER polling is set up
-  await sigPost(hostId,'join',{});
+  );
 }
 
 function disconnectClient(){
-  clearInterval(S.pollTimer); clearInterval(S.healthTimer);
-  if(S.srvChan){ try{S.srvChan.close();}catch(e){} S.srvChan=null; }
-  if(S.srvPC){ try{S.srvPC.close();}catch(e){} S.srvPC=null; }
+  clearInterval(S.healthTimer);
+  if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
   $('cDot').className='dot'; $('discBtn').style.display='none';
   setStatus('c','Disconnected',''); resetJoin(); toast('Disconnected');
 }
 
+async function handleFrame(data){
+  $('cNoVid').style.display='none';
+  const img=new Image();
+  img.onload=async()=>{
+    const cv=$('cliCanvas'); cv.width=img.width; cv.height=img.height;
+    const ctx=cv.getContext('2d'); ctx.drawImage(img,0,0);
+    let dets=[];
+    try{ dets=await S.model.detect(img); }catch(e){}
+    const lat=Date.now()-data.ts;
+    dets.forEach(d=>{
+      const[x,y,bw,bh]=d.bbox;
+      ctx.strokeStyle='#4d8fff'; ctx.lineWidth=2; ctx.strokeRect(x,y,bw,bh);
+      const lbl=d.class+' '+Math.round(d.score*100)+'%';
+      ctx.fillStyle='rgba(77,143,255,.88)'; ctx.fillRect(x,y-18,ctx.measureText(lbl).width+8,18);
+      ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x+4,y-5);
+    });
+    S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
+    const frameEnergy=(POWER_W*(lat/1000))/1000;
+    S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
+    const avgEnergy=S.cliEnergySum/S.frDone;
+    const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
+    $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
+    $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
+    renderCliDets(dets);
+    // Send result back to host via WS
+    wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
+  };
+  img.src=data.jpg;
+}
+
 async function handleSrvMsg(data){
-  if(data.t==='cfg') return;
-  if(data.t==='stats'){ renderStats(data.stats,'cResTbody','cResSec'); return; }
-  if(data.t==='frame'){
-    $('cNoVid').style.display='none';
-    const img=new Image();
-    img.onload=async()=>{
-      const cv=$('cliCanvas'); cv.width=img.width; cv.height=img.height;
-      const ctx=cv.getContext('2d'); ctx.drawImage(img,0,0);
-      let dets=[];
-      try{ dets=await S.model.detect(img); }catch(e){}
-      const lat=Date.now()-data.ts;
-      dets.forEach(d=>{
-        const[x,y,bw,bh]=d.bbox;
-        ctx.strokeStyle='#4d8fff'; ctx.lineWidth=2; ctx.strokeRect(x,y,bw,bh);
-        const lbl=d.class+' '+Math.round(d.score*100)+'%';
-        ctx.fillStyle='rgba(77,143,255,.88)'; ctx.fillRect(x,y-18,ctx.measureText(lbl).width+8,18);
-        ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x+4,y-5);
-      });
-      S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
-      // Running average energy per frame (not cumulative total)
-      const frameEnergy=(POWER_W*(lat/1000))/1000;
-      S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
-      const avgEnergy=S.cliEnergySum/S.frDone;
-      // Running average latency (all frames)
-      const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
-      $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
-      $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
-      renderCliDets(dets);
-      if(S.srvChan?.readyState==='open'){
-        S.srvChan.send(JSON.stringify({t:'result',ts:data.ts,fw:img.width,fh:img.height,dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox}))}));
-      }
-    };
+  // legacy stub — not used with WS
+}    };
     img.src=data.jpg;
   }
 }
@@ -929,14 +813,13 @@ function measureFPS(){
 }
 
 async function updateHealth(){
-  measureCPU_sync();  // sync CPU sample via microtask
+  measureCPU_sync();
   measureMemory();
   measureNetwork();
   measureFPS();
   renderHealth();
-  if(S.srvChan?.readyState==='open'){
-    S.srvChan.send(JSON.stringify({t:'health',h:{...HD}}));
-  }
+  // Send health to host via WebSocket
+  wsSend({ type:'health', code:S.code, clientId:S.myId, data:{ h:{...HD} } });
 }
 
 // Sync CPU sample (not rAF-based, called on interval too)
@@ -1039,7 +922,7 @@ function schedGA(cids){
   return cids[diffs.indexOf(Math.min(...diffs))];
 }
 function pickClient(){
-  const cids=Object.keys(S.chans).filter(id=>S.chans[id]?.readyState==='open');
+  const cids=Object.keys(S.clients);
   if(!cids.length) return null;
   switch(S.sched){
     case 'greedy': return schedGreedy(cids);
@@ -1049,10 +932,11 @@ function pickClient(){
     default: return cids[0];
   }
 }
+// dispatch is defined in initServer block above — this stub prevents duplicate
 function dispatch(jpg,fw,fh){
   const id=pickClient(); if(!id) return;
   const ts=Date.now();
-  dcSend(id,{t:'frame',jpg,fw,fh,ts});
+  wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts } });
   S.sent++; if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
   $('sFrSent').textContent=S.sent;
 }
@@ -1085,7 +969,7 @@ function setupCv(vid,cv){ const s=()=>{ if(!vid.videoWidth){requestAnimationFram
 function startCapture(){
   const tmp=document.createElement('canvas');
   S.capTimer=setInterval(()=>{
-    if(!Object.keys(S.chans).filter(id=>S.chans[id]?.readyState==='open').length) return;
+    if(!Object.keys(S.clients).length) return;
     const v=$('srvVid'); if(!v.videoWidth) return;
     tmp.width=S.res.w; tmp.height=S.res.h;
     tmp.getContext('2d').drawImage(v,0,0,tmp.width,tmp.height);
@@ -1101,7 +985,7 @@ function loadVideo(inp){
 }
 async function sendUploadFrames(){
   const v=$('upVid'); if(!v.src||!v.duration){ toast('No video loaded'); return; }
-  if(!Object.keys(S.chans).filter(id=>S.chans[id]?.readyState==='open').length){ toast('No clients connected'); return; }
+  if(!Object.keys(S.clients).length){ toast('No clients connected'); return; }
   $('upProg').style.display='block'; $('sendFrBtn').disabled=true;
   let frames;
   try{
@@ -1183,7 +1067,14 @@ function stopLiveRec(){ if(S.mr) S.mr.stop(); S.recording=false; $('recTogBtn').
 // ══════════════════════════════════════════════════════════════════
 //  SERVER UI
 // ══════════════════════════════════════════════════════════════════
-function setSched(s,el){ S.sched=s; document.querySelectorAll('.schip').forEach(c=>c.classList.remove('on')); el.classList.add('on'); Object.keys(S.chans).forEach(id=>dcSend(id,{t:'cfg',sched:s})); toast('Scheduler: '+el.querySelector('.sn').textContent); }
+function setSched(s,el){
+  S.sched=s;
+  document.querySelectorAll('.schip').forEach(c=>c.classList.remove('on'));
+  el.classList.add('on');
+  // Broadcast new scheduler to all clients
+  Object.keys(S.clients).forEach(id=>wsSend({ type:'cfg', code:S.code, clientId:S.myId, data:{ to:id, sched:s } }));
+  toast('Scheduler: '+el.querySelector('.sn').textContent);
+}
 function copyCode(){ navigator.clipboard?.writeText(S.code).then(()=>toast('Code copied!')).catch(()=>toast('Code: '+S.code)); }
 function updateCliCount(){ const n=Object.keys(S.clients).length; $('sCliCnt').textContent=n; $('sCliSec').style.display=n?'block':'none'; }
 function addClientUI(id){

@@ -2,10 +2,16 @@
   "name": "detectnet-pro",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "main": "server.js",
   "scripts": {
-    "dev": "vercel dev"
+    "start": "node server.js",
+    "dev": "node server.js"
   },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "ws": "^8.17.1"
   }
 }
