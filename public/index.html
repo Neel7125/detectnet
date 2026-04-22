@@ -224,6 +224,7 @@ body{color:var(--txt);font-family:var(--disp)}
   <div class="tb">
     <div class="tb-bk" onclick="goHome()">←</div>
     <div class="tb-ttl">Host Session</div>
+    <div class="tb-bk" onclick="refreshServer()" title="Refresh" style="font-size:15px">↺</div>
     <div class="dot" id="sDot"></div>
   </div>
   <div class="statusbar"><div class="sbdot" id="sSbDot"></div><span id="sSbTxt">Initializing...</span></div>
@@ -347,6 +348,7 @@ body{color:var(--txt);font-family:var(--disp)}
   <div class="tb">
     <div class="tb-bk" onclick="goHome()">←</div>
     <div class="tb-ttl">Join Session</div>
+    <div class="tb-bk" onclick="refreshClient()" title="Refresh" style="font-size:15px">↺</div>
     <div class="dot" id="cDot"></div>
   </div>
   <div class="statusbar"><div class="sbdot" id="cSbDot"></div><span id="cSbTxt">Loading model...</span></div>
@@ -475,9 +477,44 @@ function cleanup(){
   Object.assign(S,{
     peers:{},chans:{},clients:{},stream:null,capTimer:null,
     sent:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
-    srvPC:null,srvChan:null,frDone:0,objFound:0,cliLats:[],cliEnergy:0,
+    srvPC:null,srvChan:null,frDone:0,objFound:0,cliLats:[],cliEnergy:0,cliEnergySum:0,
     pollTimer:null,pollSince:0,myId:null,code:null,
   });
+}
+
+function refreshServer(){
+  // Tear down current session and start a fresh one
+  cleanup();
+  // Reset UI
+  $('sCode').textContent='------'; $('sCode').className='scode pend';
+  $('sHint').textContent='Connecting...'; $('cpyBtn').style.display='none';
+  $('sDot').className='dot'; $('sCliList').innerHTML=''; $('sDetList').innerHTML='';
+  $('sCliSec').style.display='none'; $('sDetSec').style.display='none'; $('sResSec').style.display='none';
+  $('sCliCnt').textContent='0'; $('sFrSent').textContent='0'; $('sTotDet').textContent='0'; $('sAvgLat').textContent='0ms';
+  setStatus('s','Refreshing...','b');
+  initServer();
+}
+
+function refreshClient(){
+  // Tear down current connection and reset client UI
+  const wasConnected=!!S.srvChan;
+  clearInterval(S.pollTimer); clearInterval(S.healthTimer);
+  if(S.srvChan){ try{S.srvChan.close();}catch(e){} S.srvChan=null; }
+  if(S.srvPC){ try{S.srvPC.close();}catch(e){} S.srvPC=null; }
+  Object.assign(S,{
+    srvPC:null,srvChan:null,frDone:0,objFound:0,cliLats:[],cliEnergy:0,cliEnergySum:0,
+    pollTimer:null,pollSince:0,myId:null,code:null,cliStart:0,
+  });
+  $('cDot').className='dot'; $('discBtn').style.display='none';
+  $('cVidSec').style.display='none'; $('cStatSec').style.display='none';
+  $('cDetSec').style.display='none'; $('cResSec').style.display='none';
+  $('cFrDone').textContent='0'; $('cObjFnd').textContent='0';
+  $('cAvgLat').textContent='0ms'; $('cEnergy').textContent='0.000000';
+  $('cDetList').innerHTML=''; $('cResTbody').innerHTML='';
+  resetJoin();
+  setStatus('c',S.modelOk?'Model ready — enter code':'Loading model...', S.modelOk?'g':'');
+  if(wasConnected) toast('Disconnected — enter code to reconnect');
+  else toast('Refreshed');
 }
 function stopStream(){ if(S.stream){ S.stream.getTracks().forEach(t=>t.stop()); S.stream=null; } }
 
@@ -540,7 +577,7 @@ async function initServer(){
 async function onClientJoin(clientId){
   console.log('[Host] Client joining:', clientId);
   // Create peer connection for this client
-  const pc = new RTCPeerConnection({iceServers:ICE});
+  const pc = new RTCPeerConnection({iceServers:ICE, iceCandidatePoolSize:10});
   S.peers[clientId] = pc;
 
   const dc = pc.createDataChannel('det',{ordered:true});
@@ -561,7 +598,14 @@ async function onClientJoin(clientId){
   pc.onicecandidate = ev=>{
     if(ev.candidate) sigPost(clientId,'ice_host',ev.candidate);
   };
-  pc.onconnectionstatechange = ()=>console.log('[Host] PC state',clientId,pc.connectionState);
+  pc.onconnectionstatechange = ()=>{
+    console.log('[Host] PC state',clientId,pc.connectionState);
+    if(pc.connectionState==='failed'){
+      // Try ICE restart
+      pc.restartIce();
+      pc.createOffer({iceRestart:true}).then(o=>pc.setLocalDescription(o)).then(()=>sigPost(clientId,'offer',pc.localDescription)).catch(()=>{});
+    }
+  };
 
   const offer = await pc.createOffer();
   await pc.setLocalDescription(offer);
@@ -644,15 +688,21 @@ async function joinSession(){
   S.myId = 'cli-'+uid();
   S.code = code;
 
-  // Tell server we want to join
-  const r = await sig('join');
+  // Tell server we want to join — retry up to 3 times
+  let r={ok:false};
+  for(let attempt=0;attempt<3;attempt++){
+    r = await sig('join');
+    if(r.ok) break;
+    if(attempt<2){ await sleep(800); setStatus('c','Retrying... ('+(attempt+2)+'/3)','b'); }
+  }
   if(!r.ok){ toast(r.error||'Session not found. Check the code.'); resetJoin(); setStatus('c','Connection failed','r'); return; }
 
   const hostId = r.hostId;
   let connTimeout;
+  let iceRestartDone=false;
 
   // Create peer connection
-  const pc = new RTCPeerConnection({iceServers:ICE});
+  const pc = new RTCPeerConnection({iceServers:ICE, iceCandidatePoolSize:10});
   S.srvPC = pc;
 
   pc.ondatachannel = ev=>{
@@ -668,6 +718,7 @@ async function joinSession(){
       $('cStatSec').style.display='block';
       $('cDetSec').style.display='block';
       S.cliStart=Date.now();
+      S.cliEnergySum=0;
       setStatus('c','Connected — receiving frames','g');
       toast('Connected! Waiting for frames...');
       updateHealth();
@@ -680,16 +731,30 @@ async function joinSession(){
     if(ev.candidate) sigPost(hostId,'ice_client',ev.candidate);
   };
 
-  pc.onconnectionstatechange = ()=>{
+  pc.onconnectionstatechange = async()=>{
     console.log('[Client] PC state:',pc.connectionState);
     if(pc.connectionState==='failed'){
-      toast('Connection failed — try again',4000); resetJoin();
-      setStatus('c','Connection failed','r');
+      if(!iceRestartDone){
+        // Try ICE restart once before giving up
+        iceRestartDone=true;
+        setStatus('c','Reconnecting...','b'); toast('Connection issue — trying ICE restart...',3000);
+        try{
+          const offer=await pc.createOffer({iceRestart:true});
+          await pc.setLocalDescription(offer);
+          await sigPost(hostId,'offer',pc.localDescription);
+        }catch(e){ toast('Reconnect failed — try again',4000); resetJoin(); setStatus('c','Connection failed','r'); }
+      } else {
+        toast('Connection failed — try again',4000); resetJoin();
+        setStatus('c','Connection failed','r');
+      }
+    }
+    if(pc.connectionState==='disconnected'){
+      setStatus('c','Connection lost — reconnecting...','b');
     }
   };
 
   // Poll for offer + ICE from host
-  connTimeout = setTimeout(()=>{ toast('No response from host. Check the code.',4000); resetJoin(); setStatus('c','Timeout','r'); }, 20000);
+  connTimeout = setTimeout(()=>{ toast('No response from host. Check the code.',4000); resetJoin(); setStatus('c','Timeout','r'); }, 25000);
 
   startPolling(async msg=>{
     if(msg.type==='offer'){
@@ -737,10 +802,14 @@ async function handleSrvMsg(data){
         ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x+4,y-5);
       });
       S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
-      const el=(Date.now()-S.cliStart)/1000; S.cliEnergy=(POWER_W*el)/1000;
+      // Running average energy per frame (not cumulative total)
+      const frameEnergy=(POWER_W*(lat/1000))/1000;
+      S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
+      const avgEnergy=S.cliEnergySum/S.frDone;
+      // Running average latency (all frames)
+      const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
       $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
-      const al=S.cliLats.slice(-10).reduce((a,b)=>a+b,0)/Math.min(S.cliLats.length,10);
-      $('cAvgLat').textContent=Math.round(al)+'ms'; $('cEnergy').textContent=S.cliEnergy.toFixed(4);
+      $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
       renderCliDets(dets);
       if(S.srvChan?.readyState==='open'){
         S.srvChan.send(JSON.stringify({t:'result',ts:data.ts,fw:img.width,fh:img.height,dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox}))}));
@@ -1018,19 +1087,49 @@ function loadVideo(inp){
   $('sendFrBtn').style.display='block'; toast('Video loaded');
 }
 async function sendUploadFrames(){
-  const v=$('upVid'); if(!v.src){ toast('No video'); return; }
+  const v=$('upVid'); if(!v.src||!v.duration){ toast('No video loaded'); return; }
   if(!Object.keys(S.chans).filter(id=>S.chans[id]?.readyState==='open').length){ toast('No clients connected'); return; }
   $('upProg').style.display='block'; $('sendFrBtn').disabled=true;
-  const frames=await extractFrames(v,60,p=>{ $('upProgBar').style.width=p+'%'; $('upProgLbl').textContent='Extracting... '+Math.round(p)+'%'; });
+  let frames;
+  try{
+    frames=await extractFrames(v,60,p=>{ $('upProgBar').style.width=p+'%'; $('upProgLbl').textContent='Extracting... '+Math.round(p)+'%'; });
+  }catch(e){
+    toast('Extract error: '+e.message); $('sendFrBtn').disabled=false; $('upProg').style.display='none'; return;
+  }
   $('upProgLbl').textContent='Sending '+frames.length+' frames...';
   S.sessStart=Date.now();
   for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); $('upProgBar').style.width=(100*(i+1)/frames.length)+'%'; await sleep(45); }
   $('upProgLbl').textContent='✓ Sent '+frames.length+' frames!'; $('sendFrBtn').disabled=false; toast('All frames sent!');
 }
 function extractFrames(vid,num,onP){
-  return new Promise(resolve=>{
-    const dur=vid.duration,frames=[],tmp=document.createElement('canvas'); let i=0,times=Array.from({length:num},(_,j)=>(j/num)*dur);
-    function next(){ if(i>=times.length){resolve(frames);return;} vid.currentTime=times[i]; vid.onseeked=()=>{ tmp.width=854;tmp.height=480; tmp.getContext('2d').drawImage(vid,0,0,854,480); frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480}); onP&&onP((i+1)/times.length*100); i++;next(); }; } next();
+  return new Promise((resolve,reject)=>{
+    const dur=vid.duration;
+    if(!dur||isNaN(dur)){ reject(new Error('Invalid video duration')); return; }
+    const frames=[],tmp=document.createElement('canvas');
+    const times=Array.from({length:num},(_,j)=>(j/(num))*dur*0.999);
+    let i=0;
+    function next(){
+      if(i>=times.length){ resolve(frames); return; }
+      const t=times[i];
+      let done=false;
+      const onSeeked=()=>{
+        if(done) return; done=true;
+        vid.removeEventListener('seeked',onSeeked);
+        clearTimeout(seekTimeout);
+        tmp.width=854; tmp.height=480;
+        tmp.getContext('2d').drawImage(vid,0,0,854,480);
+        frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
+        onP&&onP((i+1)/times.length*100);
+        i++; setTimeout(next,0);
+      };
+      // timeout fallback in case seeked never fires (some browsers/codecs)
+      const seekTimeout=setTimeout(()=>{ if(!done){ done=true; vid.removeEventListener('seeked',onSeeked); i++; setTimeout(next,0); } },3000);
+      vid.addEventListener('seeked',onSeeked);
+      vid.currentTime=t;
+    }
+    // ensure video is loaded enough
+    if(vid.readyState>=2){ next(); }
+    else{ vid.onloadeddata=()=>next(); }
   });
 }
 async function startRec(){
@@ -1094,16 +1193,31 @@ function updateSrvStats(){
   renderStats(buildStats(),'sResTbody','sResSec');
 }
 function buildStats(){
-  const el=S.sessStart?(Date.now()-S.sessStart)/1000:0, nc=Math.max(Object.keys(S.clients).length,1);
-  const al=S.lats.length?Math.round(S.lats.slice(-20).reduce((a,b)=>a+b,0)/Math.min(S.lats.length,20)):0;
+  const el=S.sessStart?(Date.now()-S.sessStart)/1000:0;
+  const nc=Math.max(Object.keys(S.clients).length,1);
+  const framesProcessed=Math.max(S.lats.length,1);
+  // Average latency per frame (running average)
+  const avgLat=S.lats.length?Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length):0;
+  // Average time per frame across schedulers (relative efficiency)
+  const avgTime=el/framesProcessed;
+  // Average energy per frame: power * time_per_frame * clients / 1000
+  const avgEnergy=(POWER_W*nc*avgTime)/1000;
   const v=[1.0,.92,.88,.85];
-  return ['greedy','pso','mompso','mompso-ga'].map((s,i)=>({name:s,time:+(el*v[i]).toFixed(2),lat:Math.round(al*v[i]),energy:+((POWER_W*nc*el*v[i])/1000).toFixed(4)}));
+  return ['greedy','pso','mompso','mompso-ga'].map((s,i)=>({
+    name:s,
+    time:+(avgTime*v[i]).toFixed(4),
+    lat:Math.round(avgLat*v[i]),
+    energy:+(avgEnergy*v[i]).toFixed(6)
+  }));
 }
 function renderStats(stats,tbodyId,secId){
   const sec=$(secId),tbody=$(tbodyId); if(!stats?.length||!sec||!tbody) return; sec.style.display='block';
   const cols=['g','b','p','a'],nms={greedy:'Greedy',pso:'PSO',mompso:'MOMPSO','mompso-ga':'MOMPSO-GA'};
+  const avgLat=Math.round(stats.reduce((a,b)=>a+b.lat,0)/stats.length);
+  const avgTime=(stats.reduce((a,b)=>a+ +b.time,0)/stats.length).toFixed(4);
+  const avgEnergy=(stats.reduce((a,b)=>a+ +b.energy,0)/stats.length).toFixed(6);
   tbody.innerHTML=stats.map((s,i)=>`<tr><td class="${cols[i]}">${nms[s.name]}</td><td class="bld">${s.time}s</td><td>${s.lat}ms</td><td>${s.energy}KJ</td></tr>`).join('')
-    +`<tr class="tot"><td>TOTAL</td><td>${stats.reduce((a,b)=>a+ +b.time,0).toFixed(2)}s</td><td>${Math.round(stats.reduce((a,b)=>a+b.lat,0)/stats.length)}ms</td><td>${stats.reduce((a,b)=>a+ +b.energy,0).toFixed(4)}KJ</td></tr>`;
+    +`<tr class="tot"><td>AVG</td><td>${avgTime}s</td><td>${avgLat}ms</td><td>${avgEnergy}KJ</td></tr>`;
 }
 function renderSrvDets(dets){
   if(!dets.length) return; $('sDetSec').style.display='block'; const list=$('sDetList');
