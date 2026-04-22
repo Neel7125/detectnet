@@ -422,15 +422,11 @@ const POWER_W    = 15;
 const CAPTURE_MS = 220;
 const RES = { '240':{w:426,h:240}, '480':{w:854,h:480}, '720':{w:1280,h:720} };
 
-// Free TURN servers — critical for cross-network (different WiFi / 4G)
+// ICE servers — STUN only for same-WiFi LAN (direct connection, no relay needed)
+// TURN would only be needed for different networks; free TURN servers are unreliable
 const ICE = [
   {urls:'stun:stun.l.google.com:19302'},
   {urls:'stun:stun1.l.google.com:19302'},
-  {urls:'stun:stun2.l.google.com:19302'},
-  {urls:'turn:openrelay.metered.ca:80',    username:'openrelayproject',credential:'openrelayproject'},
-  {urls:'turn:openrelay.metered.ca:443',   username:'openrelayproject',credential:'openrelayproject'},
-  {urls:'turns:openrelay.metered.ca:443',  username:'openrelayproject',credential:'openrelayproject'},
-  {urls:'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject',credential:'openrelayproject'},
 ];
 
 // ── STATE ─────────────────────────────────────────────────────────
@@ -534,11 +530,28 @@ async function sigPost(to, type, payload){
   await sig('post',{ to, type, payload });
 }
 
+// Wait for ICE gathering to complete, then return the full local description
+// with all candidates embedded — no trickle ICE, no race conditions
+function waitForICE(pc){
+  return new Promise(resolve=>{
+    if(pc.iceGatheringState==='complete'){ resolve(pc.localDescription); return; }
+    const check = ()=>{
+      if(pc.iceGatheringState==='complete'){
+        pc.removeEventListener('icegatheringstatechange', check);
+        resolve(pc.localDescription);
+      }
+    };
+    pc.addEventListener('icegatheringstatechange', check);
+    // Safety timeout — resolve with whatever we have after 4s
+    setTimeout(()=>{ pc.removeEventListener('icegatheringstatechange', check); resolve(pc.localDescription); }, 4000);
+  });
+}
+
 function startPolling(handler){
   S.pollSince = Date.now() - 1000;
   let polling = false;
   S.pollTimer = setInterval(async()=>{
-    if(polling) return; // prevent overlapping polls
+    if(polling) return;
     polling = true;
     try{
       const r = await fetch(`/api/signal?action=poll&code=${S.code}&clientId=${S.myId}&since=${S.pollSince}`);
@@ -580,8 +593,7 @@ async function initServer(){
 }
 
 async function onClientJoin(clientId){
-  // Deduplicate — ignore if we already have a peer for this client
-  if(S.peers[clientId]) return;
+  if(S.peers[clientId]) return; // deduplicate
   console.log('[Host] Client joining:', clientId);
 
   const pc = new RTCPeerConnection({iceServers:ICE});
@@ -601,43 +613,29 @@ async function onClientJoin(clientId){
   };
   dc.onmessage = ev=>{ try{ handleClientData(clientId,JSON.parse(ev.data)); }catch(e){} };
   dc.onclose   = ()=>{ onClientDrop(clientId); };
+  pc.onconnectionstatechange = ()=>console.log('[Host] PC state',clientId,pc.connectionState);
 
-  // Trickle ICE — send each candidate as it arrives
-  pc.onicecandidate = ev=>{
-    if(ev.candidate) sigPost(clientId,'ice_host',ev.candidate);
-  };
-  pc.onconnectionstatechange = ()=>{
-    console.log('[Host] PC state',clientId,pc.connectionState);
-  };
-
-  const offer = await pc.createOffer();
-  await pc.setLocalDescription(offer);
-  await sigPost(clientId,'offer',pc.localDescription);
+  // Create offer, wait for ALL ICE candidates to be gathered, then send complete SDP
+  await pc.setLocalDescription(await pc.createOffer());
+  const fullDesc = await waitForICE(pc);
+  await sigPost(clientId, 'offer', fullDesc);
+  console.log('[Host] Offer sent with full ICE to', clientId);
 }
 
 async function onClientAnswer(clientId, sdp){
   const pc = S.peers[clientId]; if(!pc) return;
   try{
+    // Answer already has all ICE candidates embedded — just set it
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
-    // Flush any buffered ICE candidates for this client
-    const buf = S._iceBuf?.[clientId] || [];
-    for(const c of buf){
-      await pc.addIceCandidate(new RTCIceCandidate(c)).catch(()=>{});
-    }
-    if(S._iceBuf) delete S._iceBuf[clientId];
+    console.log('[Host] Remote desc set for', clientId);
   }catch(e){ console.error('[Host] setRemote answer',e); }
 }
 
 async function onClientIce(clientId, candidate){
-  const pc = S.peers[clientId]; if(!pc) return;
-  if(pc.remoteDescription){
-    await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(()=>{});
-  } else {
-    // Buffer until answer is set
-    if(!S._iceBuf) S._iceBuf = {};
-    if(!S._iceBuf[clientId]) S._iceBuf[clientId] = [];
-    S._iceBuf[clientId].push(candidate);
-  }
+  // No-op — we use full ICE gathering, not trickle ICE
+  // Kept for backwards compat in case old clients send candidates
+  const pc = S.peers[clientId]; if(!pc||!pc.remoteDescription) return;
+  await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(()=>{});
 }
 
 function onClientDrop(clientId){
@@ -717,8 +715,7 @@ async function joinSession(){
 
   const hostId = r.hostId;
   let connTimeout;
-  let remoteSet = false;
-  const iceBuf = []; // buffer ICE candidates until remote description is set
+  let offerHandled = false;
 
   const pc = new RTCPeerConnection({iceServers:ICE});
   S.srvPC = pc;
@@ -745,15 +742,11 @@ async function joinSession(){
     dc.onclose   = ()=>{ $('cDot').className='dot r'; setStatus('c','Session ended','r'); resetJoin(); $('discBtn').style.display='none'; };
   };
 
-  pc.onicecandidate = ev=>{
-    if(ev.candidate) sigPost(hostId,'ice_client',ev.candidate);
-  };
-
   pc.onconnectionstatechange = ()=>{
     console.log('[Client] PC state:',pc.connectionState);
     if(pc.connectionState==='failed'){
       clearTimeout(connTimeout);
-      toast('Connection failed — tap Refresh and try again',4000);
+      toast('Connection failed — tap ↺ to retry',4000);
       setStatus('c','Connection failed — tap ↺ to retry','r');
     }
     if(pc.connectionState==='disconnected'){
@@ -761,36 +754,33 @@ async function joinSession(){
     }
   };
 
-  // Start polling BEFORE announcing join so we don't miss the offer
   connTimeout = setTimeout(()=>{
-    toast('No response from host — tap ↺ to retry',4000);
+    toast('No offer from host — tap ↺ to retry',4000);
     resetJoin(); setStatus('c','Timeout — tap ↺ to retry','r');
   }, 20000);
 
+  // Start polling BEFORE announcing join
   startPolling(async msg=>{
-    if(msg.type==='offer'){
+    if(msg.type==='offer' && !offerHandled){
+      offerHandled = true;
       clearTimeout(connTimeout);
+      setStatus('c','Got offer — gathering ICE...','b');
       try{
+        // Set remote description (offer has full ICE from host)
         await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
-        remoteSet = true;
-        // Flush buffered ICE candidates
-        for(const c of iceBuf){
-          await pc.addIceCandidate(new RTCIceCandidate(c)).catch(()=>{});
-        }
-        iceBuf.length = 0;
-        const answer = await pc.createAnswer();
-        await pc.setLocalDescription(answer);
-        await sigPost(hostId,'answer',pc.localDescription);
-        console.log('[Client] Answer sent');
-      }catch(e){ console.error('[Client] offer handling error',e); }
-    }
-    if(msg.type==='ice_host'){
-      if(remoteSet){
-        await pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch(()=>{});
-      } else {
-        iceBuf.push(msg.payload); // buffer until remote desc is set
+        // Create answer and wait for ALL our ICE candidates before sending
+        await pc.setLocalDescription(await pc.createAnswer());
+        const fullAnswer = await waitForICE(pc);
+        await sigPost(hostId,'answer', fullAnswer);
+        console.log('[Client] Full answer sent');
+        setStatus('c','Answer sent — connecting...','b');
+      }catch(e){
+        console.error('[Client] offer handling error',e);
+        toast('Handshake error — tap ↺ to retry',4000);
+        setStatus('c','Error — tap ↺ to retry','r');
       }
     }
+    // No need to handle ice_host — full ICE is embedded in the offer
   });
 
   // Announce join AFTER polling is set up
