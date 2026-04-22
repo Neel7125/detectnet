@@ -1180,7 +1180,8 @@ function addClientUI(id){
 }
 function updateClientUI(id){
   const cli=S.clients[id]; if(!cli) return; const s=sid(id);
-  const al=cli.lats.length?Math.round(cli.lats.slice(-5).reduce((a,b)=>a+b,0)/Math.min(cli.lats.length,5)):0;
+  // Running average latency across all frames for this client
+  const al=cli.lats.length?Math.round(cli.lats.reduce((a,b)=>a+b,0)/cli.lats.length):0;
   const m=$('clim-'+s); if(m) m.textContent=`${cli.frames}fr · ${cli.dets}obj · ${al}ms`;
   const hb=$('hbat-'+s); if(hb) hb.style.width=Math.min(100,cli.health.battery||50)+'%';
   const hc=$('hcpu-'+s); if(hc) hc.style.width=Math.min(100,100-(cli.health.cpu||50))+'%';
@@ -1188,7 +1189,8 @@ function updateClientUI(id){
 }
 function updateSrvStats(){
   $('sTotDet').textContent=S.totalDet;
-  const avg=S.lats.length?Math.round(S.lats.slice(-20).reduce((a,b)=>a+b,0)/Math.min(S.lats.length,20)):0;
+  // Running average latency across ALL frames received (not just last 20)
+  const avg=S.lats.length?Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length):0;
   $('sAvgLat').textContent=avg+'ms';
   renderStats(buildStats(),'sResTbody','sResSec');
 }
