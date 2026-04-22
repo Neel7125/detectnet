@@ -475,7 +475,7 @@ function cleanup(){
   Object.values(S.peers).forEach(pc=>{ try{pc.close();}catch(e){} });
   if(S.srvPC){ try{S.srvPC.close();}catch(e){} }
   Object.assign(S,{
-    peers:{},chans:{},clients:{},stream:null,capTimer:null,
+    peers:{},chans:{},clients:{},stream:null,capTimer:null,_iceBuf:{},
     sent:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
     srvPC:null,srvChan:null,frDone:0,objFound:0,cliLats:[],cliEnergy:0,cliEnergySum:0,
     pollTimer:null,pollSince:0,myId:null,code:null,
@@ -535,16 +535,21 @@ async function sigPost(to, type, payload){
 }
 
 function startPolling(handler){
-  S.pollSince = Date.now() - 500;
+  S.pollSince = Date.now() - 1000;
+  let polling = false;
   S.pollTimer = setInterval(async()=>{
+    if(polling) return; // prevent overlapping polls
+    polling = true;
     try{
       const r = await fetch(`/api/signal?action=poll&code=${S.code}&clientId=${S.myId}&since=${S.pollSince}`);
       const json = await r.json();
-      if(!json.ok) return;
-      S.pollSince = json.ts || Date.now();
-      (json.msgs||[]).forEach(m=>handler(m));
+      if(json.ok){
+        S.pollSince = json.ts || Date.now();
+        for(const m of (json.msgs||[])) await handler(m);
+      }
     }catch(e){}
-  }, 800);
+    polling = false;
+  }, 600);
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -575,9 +580,11 @@ async function initServer(){
 }
 
 async function onClientJoin(clientId){
+  // Deduplicate — ignore if we already have a peer for this client
+  if(S.peers[clientId]) return;
   console.log('[Host] Client joining:', clientId);
-  // Create peer connection for this client
-  const pc = new RTCPeerConnection({iceServers:ICE, iceCandidatePoolSize:10});
+
+  const pc = new RTCPeerConnection({iceServers:ICE});
   S.peers[clientId] = pc;
 
   const dc = pc.createDataChannel('det',{ordered:true});
@@ -595,16 +602,12 @@ async function onClientJoin(clientId){
   dc.onmessage = ev=>{ try{ handleClientData(clientId,JSON.parse(ev.data)); }catch(e){} };
   dc.onclose   = ()=>{ onClientDrop(clientId); };
 
+  // Trickle ICE — send each candidate as it arrives
   pc.onicecandidate = ev=>{
     if(ev.candidate) sigPost(clientId,'ice_host',ev.candidate);
   };
   pc.onconnectionstatechange = ()=>{
     console.log('[Host] PC state',clientId,pc.connectionState);
-    if(pc.connectionState==='failed'){
-      // Try ICE restart
-      pc.restartIce();
-      pc.createOffer({iceRestart:true}).then(o=>pc.setLocalDescription(o)).then(()=>sigPost(clientId,'offer',pc.localDescription)).catch(()=>{});
-    }
   };
 
   const offer = await pc.createOffer();
@@ -614,12 +617,27 @@ async function onClientJoin(clientId){
 
 async function onClientAnswer(clientId, sdp){
   const pc = S.peers[clientId]; if(!pc) return;
-  await pc.setRemoteDescription(new RTCSessionDescription(sdp)).catch(e=>console.error('[Host] setRemote',e));
+  try{
+    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    // Flush any buffered ICE candidates for this client
+    const buf = S._iceBuf?.[clientId] || [];
+    for(const c of buf){
+      await pc.addIceCandidate(new RTCIceCandidate(c)).catch(()=>{});
+    }
+    if(S._iceBuf) delete S._iceBuf[clientId];
+  }catch(e){ console.error('[Host] setRemote answer',e); }
 }
 
 async function onClientIce(clientId, candidate){
   const pc = S.peers[clientId]; if(!pc) return;
-  await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(e=>console.warn('[Host] addICE',e));
+  if(pc.remoteDescription){
+    await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(()=>{});
+  } else {
+    // Buffer until answer is set
+    if(!S._iceBuf) S._iceBuf = {};
+    if(!S._iceBuf[clientId]) S._iceBuf[clientId] = [];
+    S._iceBuf[clientId].push(candidate);
+  }
 }
 
 function onClientDrop(clientId){
@@ -688,21 +706,21 @@ async function joinSession(){
   S.myId = 'cli-'+uid();
   S.code = code;
 
-  // Tell server we want to join — retry up to 3 times
+  // Retry sig('join') up to 3 times
   let r={ok:false};
   for(let attempt=0;attempt<3;attempt++){
     r = await sig('join');
     if(r.ok) break;
-    if(attempt<2){ await sleep(800); setStatus('c','Retrying... ('+(attempt+2)+'/3)','b'); }
+    if(attempt<2){ await sleep(1000); setStatus('c','Retrying... ('+(attempt+2)+'/3)','b'); }
   }
   if(!r.ok){ toast(r.error||'Session not found. Check the code.'); resetJoin(); setStatus('c','Connection failed','r'); return; }
 
   const hostId = r.hostId;
   let connTimeout;
-  let iceRestartDone=false;
+  let remoteSet = false;
+  const iceBuf = []; // buffer ICE candidates until remote description is set
 
-  // Create peer connection
-  const pc = new RTCPeerConnection({iceServers:ICE, iceCandidatePoolSize:10});
+  const pc = new RTCPeerConnection({iceServers:ICE});
   S.srvPC = pc;
 
   pc.ondatachannel = ev=>{
@@ -731,46 +749,51 @@ async function joinSession(){
     if(ev.candidate) sigPost(hostId,'ice_client',ev.candidate);
   };
 
-  pc.onconnectionstatechange = async()=>{
+  pc.onconnectionstatechange = ()=>{
     console.log('[Client] PC state:',pc.connectionState);
     if(pc.connectionState==='failed'){
-      if(!iceRestartDone){
-        // Try ICE restart once before giving up
-        iceRestartDone=true;
-        setStatus('c','Reconnecting...','b'); toast('Connection issue — trying ICE restart...',3000);
-        try{
-          const offer=await pc.createOffer({iceRestart:true});
-          await pc.setLocalDescription(offer);
-          await sigPost(hostId,'offer',pc.localDescription);
-        }catch(e){ toast('Reconnect failed — try again',4000); resetJoin(); setStatus('c','Connection failed','r'); }
-      } else {
-        toast('Connection failed — try again',4000); resetJoin();
-        setStatus('c','Connection failed','r');
-      }
+      clearTimeout(connTimeout);
+      toast('Connection failed — tap Refresh and try again',4000);
+      setStatus('c','Connection failed — tap ↺ to retry','r');
     }
     if(pc.connectionState==='disconnected'){
-      setStatus('c','Connection lost — reconnecting...','b');
+      setStatus('c','Connection lost...','b');
     }
   };
 
-  // Poll for offer + ICE from host
-  connTimeout = setTimeout(()=>{ toast('No response from host. Check the code.',4000); resetJoin(); setStatus('c','Timeout','r'); }, 25000);
+  // Start polling BEFORE announcing join so we don't miss the offer
+  connTimeout = setTimeout(()=>{
+    toast('No response from host — tap ↺ to retry',4000);
+    resetJoin(); setStatus('c','Timeout — tap ↺ to retry','r');
+  }, 20000);
 
   startPolling(async msg=>{
     if(msg.type==='offer'){
       clearTimeout(connTimeout);
-      await pc.setRemoteDescription(new RTCSessionDescription(msg.payload)).catch(e=>console.error('[Client] setRemote',e));
-      const answer = await pc.createAnswer();
-      await pc.setLocalDescription(answer);
-      await sigPost(hostId,'answer',pc.localDescription);
-      console.log('[Client] Answer sent');
+      try{
+        await pc.setRemoteDescription(new RTCSessionDescription(msg.payload));
+        remoteSet = true;
+        // Flush buffered ICE candidates
+        for(const c of iceBuf){
+          await pc.addIceCandidate(new RTCIceCandidate(c)).catch(()=>{});
+        }
+        iceBuf.length = 0;
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+        await sigPost(hostId,'answer',pc.localDescription);
+        console.log('[Client] Answer sent');
+      }catch(e){ console.error('[Client] offer handling error',e); }
     }
     if(msg.type==='ice_host'){
-      await pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch(e=>console.warn('[Client] addICE',e));
+      if(remoteSet){
+        await pc.addIceCandidate(new RTCIceCandidate(msg.payload)).catch(()=>{});
+      } else {
+        iceBuf.push(msg.payload); // buffer until remote desc is set
+      }
     }
   });
 
-  // Announce join to host (via signaling)
+  // Announce join AFTER polling is set up
   await sigPost(hostId,'join',{});
 }
 
