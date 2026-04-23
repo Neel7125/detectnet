@@ -530,7 +530,7 @@ const WS_URL = 'wss://web-production-067c7.up.railway.app';
 
 const POWER_W    = 15;
 const CAPTURE_MS = 220;
-const RES = { '240':{w:426,h:240}, '480':{w:854,h:480}, '720':{w:1280,h:720} };
+const RESMAP = { '240':{w:426,h:240}, '480':{w:854,h:480}, '720':{w:1280,h:720} };
 const SCHEDS = ['greedy','pso','mompso','mompso-ga'];
 const SCHED_NAMES = {greedy:'Greedy',pso:'PSO',mompso:'MOMPSO','mompso-ga':'MOMPSO-GA'};
 
@@ -539,7 +539,7 @@ const S = {
   mode:null, myId:null, code:null,
   ws:null,
   clients:{},       // clientId -> { name, health, frames, dets, lats, pend, schedLats:{}, schedFrames:{} }
-  vidMode:'live', res:RES['480'],
+  vidMode:'live', res:RESMAP['480'],
   stream:null, capTimer:null,
   sent:0, totalDet:0, lats:[], sessStart:0,
   recording:false, mr:null, recChunks:[], recBlob:null,
@@ -1054,7 +1054,7 @@ function stopCamera(){
   $('startCamBtn').style.display='block'; $('stopCamBtn').style.display='none'; $('recTogBtn').style.display='none';
   if(S.recording) stopLiveRec();
 }
-function changeRes(v){ S.res=RES[v]||RES['480']; $('resBadge').textContent=v+'p'; if(S.stream){ stopCamera(); setTimeout(startCamera,300); } }
+function changeRes(v){ S.res=RESMAP[v]||RESMAP['480']; $('resBadge').textContent=v+'p'; if(S.stream){ stopCamera(); setTimeout(startCamera,300); } }
 function setupCv(vid,cv){ const s=()=>{ if(!vid.videoWidth){requestAnimationFrame(s);return;} cv.width=vid.videoWidth; cv.height=vid.videoHeight; }; s(); }
 function startCapture(){
   const tmp=document.createElement('canvas');
