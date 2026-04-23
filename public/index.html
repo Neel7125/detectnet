@@ -569,9 +569,7 @@ function onClientJoined(clientId){
   S.clients[clientId]={
     name:'Client '+n,
     health:{battery:100,cpu:50,throughput:50,fps:0},
-    frames:0, dets:0, lats:[], pend:0,
-    schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
-    schedFrames:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 }
+    frames:0, dets:0, lats:[], pend:0
   };
   updateCliCount(); addClientUI(clientId);
   toast('Client '+n+' connected!');
@@ -589,15 +587,10 @@ function onClientResult(clientId, msg){
   const cli=S.clients[clientId]; if(!cli) return;
   const lat=Date.now()-msg.ts;
   cli.frames++; cli.dets+=msg.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
-  if(msg.sched && cli.schedLats[msg.sched]){
-    cli.schedLats[msg.sched].push(lat);
-    cli.schedFrames[msg.sched]=(cli.schedFrames[msg.sched]||0)+1;
-  }
   S.totalDet+=msg.dets.length; S.lats.push(lat);
   updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
   if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
   updateSrvStats();
-  buildLiveResults();
 }
 
 function onClientHealth(clientId, h){
@@ -605,50 +598,65 @@ function onClientHealth(clientId, h){
   cli.health={...cli.health,...h}; updateClientUI(clientId);
 }
 
+// Called when a client sends its per-scheduler averages
 function onClientSchedResult(clientId, data){
+  if(!data || !Object.keys(data).length) return;
   S.clientResults[clientId] = data;
   S.clientResultsReceived.add(clientId);
-  const totalClients = Object.keys(S.clients).length;
-  const received = S.clientResultsReceived.size;
-  $('sResSubtitle').textContent = received+'/'+totalClients+' client(s) reported';
   renderFinalResults();
 }
 
-// Build results live from per-scheduler latency data the host already tracks.
-function buildLiveResults(){
-  const cids=Object.keys(S.clients);
-  if(!cids.length) return;
-  let anyData=false;
-  const result={};
-  SCHEDS.forEach(sched=>{
-    let sumAvgLat=0, sumAvgTime=0, sumAvgEnergy=0, clientsWithData=0;
-    cids.forEach(cid=>{
-      const cli=S.clients[cid];
-      const lats=cli.schedLats[sched]||[];
-      if(lats.length){
-        const avgLat=lats.reduce((a,b)=>a+b,0)/lats.length;
-        const avgTime=avgLat/1000;
-        const avgEnergy=(POWER_W*avgTime)/1000;
-        sumAvgLat   += avgLat;
-        sumAvgTime  += avgTime;
-        sumAvgEnergy+= avgEnergy;
-        clientsWithData++;
+// Host aggregates per-scheduler averages from all clients and renders the table.
+// Each client sends: { greedy:{avgTime,avgLat,avgEnergy,frames}, pso:{...}, ... }
+// Host sums across clients (each handled a different slice of the video).
+function renderFinalResults(){
+  const sec=$('sResSec'), tbody=$('sResTbody');
+  if(!sec||!tbody) return;
+
+  const reportedIds=Object.keys(S.clientResults);
+  if(!reportedIds.length) return;
+
+  const cols=['g','b','p','a'];
+  let rows='';
+  let totTime=0, totLat=0, totEnergy=0, schedCount=0;
+
+  SCHEDS.forEach((sched,i)=>{
+    let sumTime=0, sumLat=0, sumEnergy=0, found=false;
+    reportedIds.forEach(cid=>{
+      const cr=S.clientResults[cid];
+      if(cr && cr[sched] && cr[sched].frames>0){
+        sumTime   += cr[sched].avgTime   || 0;
+        sumLat    += cr[sched].avgLat    || 0;
+        sumEnergy += cr[sched].avgEnergy || 0;
+        found = true;
       }
     });
-    if(clientsWithData>0) anyData=true;
-    result[sched]={
-      avgTime:   sumAvgTime,
-      avgLat:    sumAvgLat,
-      avgEnergy: sumAvgEnergy,
-      frames:    clientsWithData   // >0 means real data exists
-    };
+    if(!found) return;
+    totTime   += sumTime;
+    totLat    += sumLat;
+    totEnergy += sumEnergy;
+    schedCount++;
+    rows+=`<tr>
+      <td class="${cols[i]}">${SCHED_NAMES[sched]}</td>
+      <td class="bld">${sumTime.toFixed(4)}s</td>
+      <td>${sumLat.toFixed(1)}ms</td>
+      <td>${sumEnergy.toFixed(6)}KJ</td>
+    </tr>`;
   });
-  if(!anyData) return; // nothing to show yet
-  S.clientResults['__live__']=result;
-  renderFinalResults();
-}
 
-// ── SCHEDULERS ────────────────────────────────────────────────────
+  if(!schedCount) return;
+
+  sec.style.display='block';
+  const totalClients=Object.keys(S.clients).length||reportedIds.length;
+  $('sResSubtitle').textContent=reportedIds.length+'/'+totalClients+' client(s) reported';
+
+  tbody.innerHTML=rows+`<tr class="tot">
+    <td>TOTAL</td>
+    <td>${totTime.toFixed(4)}s</td>
+    <td>${totLat.toFixed(1)}ms</td>
+    <td>${totEnergy.toFixed(6)}KJ</td>
+  </tr>`;
+}
 function hScore(cli){
   const h=cli.health||{};
   const hasBat=(h.battery!=null&&h.battery>=0);
@@ -716,76 +724,6 @@ function dispatch(jpg,fw,fh){
 }
 
 // ── SERVER RESULTS ────────────────────────────────────────────────
-// Result table logic:
-//   • Each client sends per-scheduler averages (avg over its own frames).
-//   • Host SUMS those averages across clients — each client handled a
-//     different slice of the video, so the sum represents the whole video.
-//   • Total row = sum across all schedulers (overall video metrics).
-function renderFinalResults(){
-  const sec=$('sResSec'), tbody=$('sResTbody');
-  if(!sec||!tbody) return;
-
-  const reportedIds=Object.keys(S.clientResults).filter(k=>k!=='__live__');
-  const live=S.clientResults['__live__'];
-  const hasReported=reportedIds.length>0;
-  const hasLive=!!(live && Object.keys(live).length);
-  if(!hasReported && !hasLive) return;
-
-  const cols=['g','b','p','a'];
-  let rows='';
-  let totTime=0, totLat=0, totEnergy=0, schedCount=0;
-
-  SCHEDS.forEach((sched,i)=>{
-    let sumTime=0, sumLat=0, sumEnergy=0, found=false;
-
-    if(hasReported){
-      reportedIds.forEach(cid=>{
-        const cr=S.clientResults[cid];
-        if(cr && cr[sched] && cr[sched].frames>0){
-          sumTime   += cr[sched].avgTime   || 0;
-          sumLat    += cr[sched].avgLat    || 0;
-          sumEnergy += cr[sched].avgEnergy || 0;
-          found = true;
-        }
-      });
-    }
-
-    // Fall back to live data for this scheduler if not yet reported
-    if(!found && hasLive && live[sched] && live[sched].frames>0){
-      sumTime   = live[sched].avgTime   || 0;
-      sumLat    = live[sched].avgLat    || 0;
-      sumEnergy = live[sched].avgEnergy || 0;
-      found = true;
-    }
-
-    if(!found) return; // no data for this scheduler yet — skip row
-    totTime   += sumTime;
-    totLat    += sumLat;
-    totEnergy += sumEnergy;
-    schedCount++;
-    rows+=`<tr>
-      <td class="${cols[i]}">${SCHED_NAMES[sched]}</td>
-      <td class="bld">${sumTime.toFixed(4)}s</td>
-      <td>${sumLat.toFixed(1)}ms</td>
-      <td>${sumEnergy.toFixed(6)}KJ</td>
-    </tr>`;
-  });
-
-  if(!schedCount) return; // nothing to render yet
-
-  sec.style.display='block';
-  $('sResSubtitle').textContent = hasReported
-    ? reportedIds.length+'/'+Object.keys(S.clients).length+' client(s) reported'
-    : 'Live · updating as frames arrive';
-
-  tbody.innerHTML = rows + `<tr class="tot">
-    <td>TOTAL</td>
-    <td>${totTime.toFixed(4)}s</td>
-    <td>${totLat.toFixed(1)}ms</td>
-    <td>${totEnergy.toFixed(6)}KJ</td>
-  </tr>`;
-}
-
 function updateSrvStats(){
   $('sTotDet').textContent=S.totalDet;
   const avg=S.lats.length?Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length):0;
@@ -885,31 +823,48 @@ function sendSchedResults(){
   SCHEDS.forEach(sched=>{
     const d=S.schedData[sched];
     if(!d || !d.frames) return;
-    // avgLat = average latency per frame for this scheduler on this client
-    const avgLat    = d.lats.length ? d.lats.reduce((a,b)=>a+b,0)/d.lats.length : 0;
-    // avgTime = avgLat in seconds
+    const avgLat    = d.lats.reduce((a,b)=>a+b,0)/d.lats.length;
     const avgTime   = avgLat/1000;
-    // avgEnergy = average energy per frame for this scheduler on this client
     const avgEnergy = d.energySum/d.frames;
     result[sched]={ avgTime, avgLat, avgEnergy, frames:d.frames };
   });
+  if(!Object.keys(result).length) return; // nothing to send yet
   wsSend({ type:'sched-result', code:S.code, clientId:S.myId, data:result });
 }
 
 async function handleFrame(data){
   $('cNoVid').style.display='none';
-  if(!data.jpg){ console.warn('[frame] no jpg in frame'); return; }
+  if(!data.jpg){ console.warn('[frame] no jpg'); return; }
   const sched = data.sched || 'greedy';
+
   const img=new Image();
-  img.onerror = ()=>{ console.error('[frame] img failed to load'); };
+  img.onerror=()=>{ console.error('[frame] img load failed'); };
   img.onload=async()=>{
     const cv=$('cliCanvas'); cv.width=img.width; cv.height=img.height;
     const ctx=cv.getContext('2d'); ctx.drawImage(img,0,0);
+
+    // ── Object detection ──────────────────────────────────────
     let dets=[];
     if(S.model){
-      try{ dets=await S.model.detect(img); }catch(e){ console.error('[frame] detect error',e); }
+      try{ dets=await S.model.detect(img); }catch(e){ console.error('[detect]',e); }
     }
-    const lat=Date.now()-data.ts;
+
+    // ── Per-frame metrics ─────────────────────────────────────
+    const lat         = Date.now()-data.ts;          // ms
+    const frameTime   = lat/1000;                    // seconds
+    const frameEnergy = (POWER_W*frameTime)/1000;    // KJ
+
+    // Accumulate into per-scheduler buckets
+    if(!S.schedData[sched]) S.schedData[sched]={ lats:[], energySum:0, frames:0 };
+    S.schedData[sched].lats.push(lat);
+    S.schedData[sched].energySum += frameEnergy;
+    S.schedData[sched].frames++;
+
+    // Overall client counters (for display only)
+    S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
+    S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
+
+    // Draw boxes
     dets.forEach(d=>{
       const[x,y,bw,bh]=d.bbox;
       ctx.strokeStyle='#4d8fff'; ctx.lineWidth=2; ctx.strokeRect(x,y,bw,bh);
@@ -917,21 +872,21 @@ async function handleFrame(data){
       ctx.fillStyle='rgba(77,143,255,.88)'; ctx.fillRect(x,y-18,ctx.measureText(lbl).width+8,18);
       ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x+4,y-5);
     });
-    S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
-    const frameEnergy=(POWER_W*(lat/1000))/1000;
-    S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
-    if(!S.schedData[sched]) S.schedData[sched]={ lats:[], energySum:0, frames:0 };
-    S.schedData[sched].lats.push(lat);
-    S.schedData[sched].energySum+=frameEnergy;
-    S.schedData[sched].frames++;
-    const avgEnergy=S.cliEnergySum/S.frDone;
+
+    // Update client UI
     const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
-    $('cFrDone').textContent=S.frDone+' (×4 scheds)'; $('cObjFnd').textContent=S.objFound;
+    const avgEnergy=S.cliEnergySum/S.frDone;
+    $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
-    wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, sched, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
-    // Send scheduler averages every 5 frames so host results update live
-    if(S.frDone%5===0) sendSchedResults();
+
+    // Send raw result back to host (for detection overlay + cluster stats)
+    wsSend({ type:'result', code:S.code, clientId:S.myId,
+      data:{ ts:data.ts, fw:img.width, fh:img.height, sched,
+             dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
+
+    // Send per-scheduler averages to host on every frame so table updates live
+    sendSchedResults();
   };
   img.src=data.jpg;
 }
