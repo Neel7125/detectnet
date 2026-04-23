@@ -1068,24 +1068,38 @@ function startCapture(){
 function loadVideo(inp){
   const f=inp.files[0]; if(!f) return;
   $('upLabel').textContent=f.name;
+  $('upFrCtrl').style.display='none';
+  $('sendFrBtn').style.display='none';
   $('upVidWrap').style.display='block';
+
   const v=$('upVid');
-  v.src=URL.createObjectURL(f);
+  // Clear previous state fully
+  v.pause();
+  v.removeAttribute('src');
+  v.load();
+
+  const url=URL.createObjectURL(f);
+
   v.onloadedmetadata=()=>{
     const dur=v.duration||0;
-    // Estimate total frames at 30fps (conservative — actual may vary)
-    const estFrames=Math.max(1,Math.round(dur*30));
-    // Default extract count: min(300, total) — sensible default
-    const defCount=Math.min(300,estFrames);
-    $('upFrTotal').textContent='Total ~'+estFrames+' frames';
-    $('upFrInp').max=estFrames;
+    if(!dur||isNaN(dur)){ toast('Could not read video duration'); return; }
+    // Exact frame count: use video track info if available, else 30fps estimate
+    const fps=30;
+    const exactFrames=Math.max(1,Math.round(dur*fps));
+    const defCount=Math.min(300,exactFrames);
+    $('upFrTotal').textContent='Total ~'+exactFrames+' frames ('+dur.toFixed(1)+'s @ '+fps+'fps)';
+    $('upFrInp').max=exactFrames;
     $('upFrInp').value=defCount;
     $('upFrCtrl').style.display='block';
     $('sendFrBtn').style.display='block';
+    toast('Video ready — '+exactFrames+' frames');
   };
+  v.onerror=()=>{ toast('Failed to load video — try another file'); };
+
+  v.src=url;
   v.load();
-  toast('Video loaded');
 }
+
 function clampFrInp(){
   const inp=$('upFrInp');
   const max=parseInt(inp.max)||9999;
@@ -1098,78 +1112,121 @@ function setFrMax(){
   const inp=$('upFrInp');
   inp.value=inp.max||300;
 }
+
 async function sendUploadFrames(){
-  const v=$('upVid'); if(!v.src||!v.duration){ toast('No video loaded'); return; }
+  const v=$('upVid');
+  if(!v.src||!v.duration){ toast('No video loaded'); return; }
   if(!Object.keys(S.clients).length){ toast('No clients connected'); return; }
-  const numFrames=Math.max(1,parseInt($('upFrInp').value)||60);
+  const numFrames=Math.max(1,Math.min(parseInt($('upFrInp').value)||60, parseInt($('upFrInp').max)||9999));
   $('upProg').style.display='block'; $('sendFrBtn').disabled=true;
   let frames;
   try{
-    frames=await extractFrames(v,numFrames,p=>{ $('upProgBar').style.width=p+'%'; $('upProgLbl').textContent='Extracting... '+Math.round(p)+'%'; });
+    frames=await extractFrames(v.src, v.duration, numFrames, p=>{
+      $('upProgBar').style.width=p+'%';
+      $('upProgLbl').textContent='Extracting... '+Math.round(p)+'% ('+Math.round(p/100*numFrames)+'/'+numFrames+')';
+    });
   }catch(e){
     toast('Extract error: '+e.message); $('sendFrBtn').disabled=false; $('upProg').style.display='none'; return;
   }
   $('upProgLbl').textContent='Sending '+frames.length+' frames...';
   S.sessStart=Date.now();
-  for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); $('upProgBar').style.width=(100*(i+1)/frames.length)+'%'; await sleep(45); }
-  $('upProgLbl').textContent='✓ Sent '+frames.length+' frames!'; $('sendFrBtn').disabled=false; toast('All frames sent!');
+  for(let i=0;i<frames.length;i++){
+    dispatch(frames[i].jpg,frames[i].w,frames[i].h);
+    $('upProgBar').style.width=(100*(i+1)/frames.length)+'%';
+    await sleep(45);
+  }
+  $('upProgLbl').textContent='✓ Sent '+frames.length+' frames!';
+  $('sendFrBtn').disabled=false;
+  toast('All frames sent!');
 }
 
-// ── Frame extraction — play-through method, no seeking stalls ────
-// Plays the video at 16x speed, captures frames at evenly-spaced
-// time intervals using requestAnimationFrame. Completely avoids
-// the seek-stall problem on mobile browsers.
-function extractFrames(vid,num,onP){
-  return new Promise((resolve,reject)=>{
-    const dur=vid.duration;
-    if(!dur||isNaN(dur)||dur<=0){ reject(new Error('Invalid video duration')); return; }
+// ── Frame extraction ─────────────────────────────────────────────
+// Uses a hidden off-screen video element (never the display element)
+// so play/pause conflicts are impossible.
+// Seek-based: seeks to each target time, waits for the frame to be
+// fully decoded (rAF after seeked), then captures. Exact count guaranteed.
+function extractFrames(srcUrl, duration, num, onP){
+  return new Promise((resolve, reject)=>{
+    if(!duration||isNaN(duration)||duration<=0){
+      reject(new Error('Invalid video duration')); return;
+    }
 
-    const frames=[];
+    // Create a completely separate hidden video for extraction
+    const vid=document.createElement('video');
+    vid.muted=true;
+    vid.preload='auto';
+    vid.playsInline=true;
+    vid.style.cssText='position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none';
+    document.body.appendChild(vid);
+
     const tmp=document.createElement('canvas');
     tmp.width=854; tmp.height=480;
     const ctx=tmp.getContext('2d');
 
-    // Evenly-spaced target times across the video
-    const targets=Array.from({length:num},(_,j)=>(j/(num-1||1))*dur*0.999);
-    let tIdx=0;
-    let rafId=null;
-    let done=false;
+    // Exactly `num` evenly-spaced timestamps
+    const targets=Array.from({length:num},(_,j)=>
+      num===1 ? 0 : (j/(num-1))*duration*0.999
+    );
+    const frames=[];
+    let i=0;
+    let dead=false;
 
-    function finish(){
-      if(done) return; done=true;
-      vid.pause();
-      vid.ontimeupdate=null;
-      vid.onended=null;
-      cancelAnimationFrame(rafId);
-      resolve(frames);
+    function cleanup(){ dead=true; try{ document.body.removeChild(vid); }catch(e){} }
+
+    function done(){ cleanup(); resolve(frames); }
+    function fail(e){ cleanup(); reject(e); }
+
+    function captureAndNext(){
+      // Draw current decoded frame
+      ctx.drawImage(vid,0,0,854,480);
+      frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
+      onP&&onP((i+1)/num*100);
+      i++;
+      if(i>=num){ done(); return; }
+      seekNext();
     }
 
-    function tick(){
-      if(done) return;
-      const ct=vid.currentTime;
+    function seekNext(){
+      if(dead) return;
+      const t=targets[i];
 
-      // Capture all targets that we've passed
-      while(tIdx<targets.length && ct>=targets[tIdx]){
-        ctx.drawImage(vid,0,0,854,480);
-        frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
-        onP&&onP((tIdx+1)/targets.length*100);
-        tIdx++;
+      let seeked=false;
+      let rafId=null;
+      let timer=null;
+
+      function onSeeked(){
+        if(seeked) return; seeked=true;
+        vid.onseeked=null;
+        clearTimeout(timer);
+        // Wait one rAF so the browser paints the decoded frame to the element
+        cancelAnimationFrame(rafId);
+        rafId=requestAnimationFrame(()=>{
+          requestAnimationFrame(captureAndNext); // two rAFs = fully decoded
+        });
       }
 
-      if(tIdx>=targets.length){ finish(); return; }
-      rafId=requestAnimationFrame(tick);
+      // Hard timeout: 10s — capture whatever is there
+      timer=setTimeout(()=>{
+        if(seeked) return; seeked=true;
+        vid.onseeked=null;
+        cancelAnimationFrame(rafId);
+        captureAndNext();
+      },10000);
+
+      vid.onseeked=onSeeked;
+      try{ vid.currentTime=t; }
+      catch(e){ clearTimeout(timer); vid.onseeked=null; fail(e); }
     }
 
     function start(){
-      vid.muted=true;
-      vid.playbackRate=16; // fast-forward — still fires timeupdate/rAF
-      vid.currentTime=0;
-      vid.onended=()=>{ tick(); finish(); }; // capture any remaining on end
-      vid.play().then(()=>{ rafId=requestAnimationFrame(tick); }).catch(e=>reject(e));
+      vid.pause();
+      seekNext();
     }
 
-    if(vid.readyState>=2){ start(); }
-    else{ vid.onloadeddata=()=>start(); vid.load(); }
+    vid.onloadeddata=()=>start();
+    vid.onerror=()=>fail(new Error('Video failed to load for extraction'));
+    vid.src=srcUrl;
+    vid.load();
   });
 }
 
@@ -1188,10 +1245,18 @@ async function startRec(){
 function stopRec(){ if(S.mr&&S.recording){ S.mr.stop(); S.recording=false; } $('stopRecBtn').style.display='none'; $('startRecBtn').style.display='block'; $('recTag').style.display='none'; stopStream(); }
 async function sendRecFrames(){
   if(!S.recBlob){ toast('No recording'); return; }
-  const url=URL.createObjectURL(S.recBlob),v=document.createElement('video'); v.src=url; v.muted=true;
-  await new Promise(r=>{ v.onloadedmetadata=r; v.load(); });
+  const url=URL.createObjectURL(S.recBlob);
+  // Get duration first
+  const dur=await new Promise(r=>{
+    const tmp=document.createElement('video');
+    tmp.muted=true; tmp.preload='metadata';
+    tmp.onloadedmetadata=()=>r(tmp.duration);
+    tmp.onerror=()=>r(0);
+    tmp.src=url; tmp.load();
+  });
+  if(!dur){ toast('Could not read recording duration'); return; }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--amb)">Extracting & sending...</div><div class="pwrap" style="margin-top:6px"><div class="pbar b" id="rp" style="width:0%"></div></div>';
-  const frames=await extractFrames(v,60,p=>{ const b=$('rp'); if(b) b.style.width=p+'%'; });
+  const frames=await extractFrames(url, dur, 60, p=>{ const b=$('rp'); if(b) b.style.width=p+'%'; });
   S.sessStart=Date.now();
   for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); await sleep(45); }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--acc)">✓ Sent '+frames.length+' frames!</div>';
