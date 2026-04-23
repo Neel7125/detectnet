@@ -1393,7 +1393,7 @@ function addClientUI(id){
 function updateClientUI(id){
   const cli=S.clients[id]; if(!cli) return; const s=sid(id);
   const al=cli.lats.length?Math.round(cli.lats.reduce((a,b)=>a+b,0)/cli.lats.length):0;
-  const m=$('clim-'+s); if(m) m.textContent=`${cli.dispatchedFrames||0}fr · ${cli.dets}obj · ${al}ms`;
+  const m=$('clim-'+s); if(m) m.textContent=`${Math.floor(cli.frames/4)}fr · ${cli.dets}obj · ${al}ms`;
   const hb=$('hbat-'+s); if(hb) hb.style.width=Math.min(100,cli.health.battery||50)+'%';
   const hc=$('hcpu-'+s); if(hc) hc.style.width=Math.min(100,100-(cli.health.cpu||50))+'%';
   const sc=$('clsc-'+s); if(sc) sc.textContent=(hScore(cli)*100).toFixed(0)+'pts';
