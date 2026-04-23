@@ -1247,6 +1247,7 @@ async function sendUploadFrames(){
   $('upProgLbl').textContent = '✓ All '+frames.length+' frames sent!';
   $('sendFrBtn').disabled = false;
   toast('Done! '+frames.length+' frames sent');
+  showClientFrameSummary();
 }
 
 // ── Frame extraction ─────────────────────────────────────────────
@@ -1368,6 +1369,7 @@ async function sendRecFrames(){
   for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); await sleep(45); }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--acc)">✓ Sent '+frames.length+' frames!</div>';
   toast('Done!');
+  showClientFrameSummary();
 }
 let lrc=[];
 function toggleRec(){ if(!S.recording){ startLiveRec(); }else{ stopLiveRec(); } }
@@ -1385,15 +1387,25 @@ function stopLiveRec(){ if(S.mr) S.mr.stop(); S.recording=false; $('recTogBtn').
 // ══════════════════════════════════════════════════════════════════
 function copyCode(){ navigator.clipboard?.writeText(S.code).then(()=>toast('Code copied!')).catch(()=>toast('Code: '+S.code)); }
 function updateCliCount(){ const n=Object.keys(S.clients).length; $('sCliCnt').textContent=n; $('sCliSec').style.display=n?'block':'none'; }
+
+function showClientFrameSummary(){
+  const total = S.sent || 0;
+  Object.keys(S.clients).forEach(function(id){
+    const cli = S.clients[id];
+    const s = sid(id);
+    const el = document.getElementById('cliframes-'+s);
+    if(el) el.textContent = 'Frames assigned: ' + cli.dispatchedFrames + ' / ' + total;
+  });
+}
 function addClientUI(id){
   const cli=S.clients[id],s=sid(id),el=document.createElement('div'); el.className='cliitem'; el.id='cli-'+s;
-  el.innerHTML=`<div class="cliav">${cli.name.split(' ').pop()}</div><div class="cliinf"><div class="clinm">${cli.name}</div><div class="climt" id="clim-${s}">Connected</div><div class="hbrow"><div class="hbl">BAT</div><div class="hbt"><div class="hb" id="hbat-${s}" style="width:50%;background:var(--acc)"></div></div><div class="hbl" style="margin-left:5px">CPU</div><div class="hbt"><div class="hb" id="hcpu-${s}" style="width:50%;background:var(--blue)"></div></div></div></div><div class="clsc" id="clsc-${s}">--</div>`;
+  el.innerHTML=`<div class="cliav">${cli.name.split(' ').pop()}</div><div class="cliinf"><div class="clinm">${cli.name}</div><div class="climt" id="clim-${s}">Connected</div><div style="font-size:9px;font-family:var(--mono);color:var(--acc);margin-top:3px" id="cliframes-${s}"></div><div class="hbrow"><div class="hbl">BAT</div><div class="hbt"><div class="hb" id="hbat-${s}" style="width:50%;background:var(--acc)"></div></div><div class="hbl" style="margin-left:5px">CPU</div><div class="hbt"><div class="hb" id="hcpu-${s}" style="width:50%;background:var(--blue)"></div></div></div></div><div class="clsc" id="clsc-${s}">--</div>`;
   $('sCliList').appendChild(el);
 }
 function updateClientUI(id){
   const cli=S.clients[id]; if(!cli) return; const s=sid(id);
   const al=cli.lats.length?Math.round(cli.lats.reduce((a,b)=>a+b,0)/cli.lats.length):0;
-  const m=$('clim-'+s); if(m) m.textContent=`${Math.floor(cli.frames/4)}fr · ${cli.dets}obj · ${al}ms`;
+  const m=$('clim-'+s); if(m) m.textContent=`${cli.frames}fr · ${cli.dets}obj · ${al}ms`;
   const hb=$('hbat-'+s); if(hb) hb.style.width=Math.min(100,cli.health.battery||50)+'%';
   const hc=$('hcpu-'+s); if(hc) hc.style.width=Math.min(100,100-(cli.health.cpu||50))+'%';
   const sc=$('clsc-'+s); if(sc) sc.textContent=(hScore(cli)*100).toFixed(0)+'pts';
