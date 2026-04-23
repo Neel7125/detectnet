@@ -680,13 +680,15 @@ function onClientDrop(clientId){
 function onClientResult(clientId, msg){
   const cli=S.clients[clientId]; if(!cli) return;
   const lat = Date.now() - msg.ts;
-  cli.frames++; cli.dets+=msg.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
-  // accumulate per-scheduler latency on host
+  const dets = msg.dets || [];
   const sched = msg.sched || 'greedy';
-  if(cli.schedLats[sched]) cli.schedLats[sched].push(lat);
-  S.totalDet+=msg.dets.length; S.lats.push(lat);
-  updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
-  if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
+  cli.frames++; cli.dets+=dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
+  // accumulate per-scheduler latency on host
+  if(!cli.schedLats[sched]) cli.schedLats[sched]=[];
+  cli.schedLats[sched].push(lat);
+  S.totalDet+=dets.length; S.lats.push(lat);
+  updateCliCount(); updateClientUI(clientId); renderSrvDets(dets);
+  if(dets.length) drawSrvBoxes(dets,msg.fw,msg.fh);
   updateSrvStats();
   renderFinalResults();
 }
@@ -811,15 +813,15 @@ function pickClientForSched(sched){
 function dispatch(jpg,fw,fh){
   const cids=Object.keys(S.clients);
   if(!cids.length) return;
-  const ts=Date.now();
   SCHEDS.forEach(sched=>{
     const id=pickClientForSched(sched);
     if(!id) return;
+    const ts=Date.now(); // separate ts per scheduler so latency is accurate
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
     if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
   });
-  S.sent++; // 1 per video frame, not per scheduler
+  S.sent++;
   $('sFrSent').textContent=S.sent;
 }
 
