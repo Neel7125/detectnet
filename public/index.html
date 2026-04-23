@@ -662,8 +662,8 @@ function onClientJoined(clientId){
     name:'Client '+n,
     health:{battery:100,cpu:50,throughput:50,fps:0},
     frames:0, dets:0, lats:[], pend:0,
-    // per-scheduler latency accumulator on host
-    schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] }
+    schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+    tsMap:{} // ts -> sched, so host knows which sched a result belongs to
   };
   updateCliCount(); addClientUI(clientId);
   toast('Client '+n+' connected!');
@@ -681,11 +681,14 @@ function onClientResult(clientId, msg){
   const cli=S.clients[clientId]; if(!cli) return;
   const lat = Date.now() - msg.ts;
   const dets = msg.dets || [];
-  const sched = msg.sched || 'greedy';
+  // use tsMap as primary source, fall back to msg.sched
+  const sched = (cli.tsMap && cli.tsMap[msg.ts]) || msg.sched || 'greedy';
+  if(cli.tsMap) delete cli.tsMap[msg.ts]; // clean up
+  console.log('[HOST result] sched='+sched+' lat='+lat+' msg.sched='+msg.sched);
   cli.frames++; cli.dets+=dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
-  // accumulate per-scheduler latency on host
   if(!cli.schedLats[sched]) cli.schedLats[sched]=[];
   cli.schedLats[sched].push(lat);
+  console.log('[HOST schedLats]', JSON.stringify({g:cli.schedLats.greedy.length, p:cli.schedLats.pso.length, m:cli.schedLats.mompso.length, mg:cli.schedLats['mompso-ga'].length}));
   S.totalDet+=dets.length; S.lats.push(lat);
   updateCliCount(); updateClientUI(clientId); renderSrvDets(dets);
   if(dets.length) drawSrvBoxes(dets,msg.fw,msg.fh);
@@ -814,9 +817,12 @@ function dispatch(jpg,fw,fh){
   const cids=Object.keys(S.clients);
   if(!cids.length) return;
   SCHEDS.forEach(sched=>{
-    const id=pickClientForSched(sched);
+    const id = cids.length===1 ? cids[0] : pickClientForSched(sched);
     if(!id) return;
-    const ts=Date.now(); // separate ts per scheduler so latency is accurate
+    const ts=Date.now();
+    // record ts→sched on host so result lookup is reliable
+    if(S.clients[id]) S.clients[id].tsMap[ts]=sched;
+    console.log('[HOST dispatch] sched='+sched+' to='+id+' ts='+ts);
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
     if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
@@ -929,6 +935,7 @@ async function handleFrame(data){
   $('cNoVid').style.display='none';
   if(!data.jpg){ console.warn('[frame] no jpg'); return; }
   const sched = data.sched || 'greedy';
+  console.log('[CLIENT handleFrame] sched='+sched+' ts='+data.ts);
 
   const img=new Image();
   img.onerror=()=>{ console.error('[frame] img load failed'); };
