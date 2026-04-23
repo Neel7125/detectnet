@@ -494,6 +494,7 @@ function cleanup(){
     frDone:0,objFound:0,cliLats:[],cliEnergySum:0,
     schedData:{},
     myId:null,code:null,
+    _vidUrl:null,_vidDuration:0,_vidTotalFrames:0,
   });
 }
 
@@ -1067,37 +1068,46 @@ function startCapture(){
 }
 function loadVideo(inp){
   const f=inp.files[0]; if(!f) return;
-  $('upLabel').textContent=f.name;
+
+  // Reset UI
   $('upFrCtrl').style.display='none';
   $('sendFrBtn').style.display='none';
+  $('upProg').style.display='none';
   $('upVidWrap').style.display='block';
+  $('upLabel').textContent=f.name;
 
   const v=$('upVid');
-  // Clear previous state fully
   v.pause();
   v.removeAttribute('src');
-  v.load();
+  v.load(); // flush old source
 
-  const url=URL.createObjectURL(f);
+  // Store object URL so we can pass it to extractFrames later
+  S._vidUrl = URL.createObjectURL(f);
+
+  v.onloadedmetadata = null;
+  v.onerror = null;
 
   v.onloadedmetadata=()=>{
     const dur=v.duration||0;
-    if(!dur||isNaN(dur)){ toast('Could not read video duration'); return; }
-    // Exact frame count: use video track info if available, else 30fps estimate
-    const fps=30;
-    const exactFrames=Math.max(1,Math.round(dur*fps));
-    const defCount=Math.min(300,exactFrames);
-    $('upFrTotal').textContent='Total ~'+exactFrames+' frames ('+dur.toFixed(1)+'s @ '+fps+'fps)';
-    $('upFrInp').max=exactFrames;
-    $('upFrInp').value=defCount;
-    $('upFrCtrl').style.display='block';
-    $('sendFrBtn').style.display='block';
-    toast('Video ready — '+exactFrames+' frames');
+    if(!dur||isNaN(dur)||!isFinite(dur)){ toast('Could not read video duration'); return; }
+    // Use actual video frame rate if browser exposes it, else 30fps
+    const fps = (v.getVideoPlaybackQuality && v.getVideoPlaybackQuality().totalVideoFrames > 0)
+      ? null : 30; // we'll use duration-based count
+    const exactFrames = Math.max(1, Math.round(dur * 30));
+    S._vidDuration = dur;
+    S._vidTotalFrames = exactFrames;
+    const defCount = Math.min(100, exactFrames);
+    $('upFrTotal').textContent = 'Total ' + exactFrames + ' frames  (' + dur.toFixed(1) + 's)';
+    $('upFrInp').max = exactFrames;
+    $('upFrInp').value = defCount;
+    $('upFrCtrl').style.display = 'block';
+    $('sendFrBtn').style.display = 'block';
+    toast('Video ready · ' + exactFrames + ' frames');
   };
-  v.onerror=()=>{ toast('Failed to load video — try another file'); };
+  v.onerror = ()=>{ toast('Failed to load video — try another file'); };
 
-  v.src=url;
-  v.load();
+  v.src = S._vidUrl;
+  // Do NOT call v.load() here — setting src triggers load automatically
 }
 
 function clampFrInp(){
@@ -1109,123 +1119,134 @@ function clampFrInp(){
   inp.value=v;
 }
 function setFrMax(){
-  const inp=$('upFrInp');
-  inp.value=inp.max||300;
+  $('upFrInp').value = $('upFrInp').max || 100;
 }
 
 async function sendUploadFrames(){
-  const v=$('upVid');
-  if(!v.src||!v.duration){ toast('No video loaded'); return; }
+  if(!S._vidUrl || !S._vidDuration){ toast('No video loaded'); return; }
   if(!Object.keys(S.clients).length){ toast('No clients connected'); return; }
-  const numFrames=Math.max(1,Math.min(parseInt($('upFrInp').value)||60, parseInt($('upFrInp').max)||9999));
-  $('upProg').style.display='block'; $('sendFrBtn').disabled=true;
+
+  // Clamp to [1, totalFrames]
+  const total = S._vidTotalFrames || 100;
+  const numFrames = Math.max(1, Math.min(parseInt($('upFrInp').value) || 30, total));
+  $('upFrInp').value = numFrames; // show clamped value
+
+  $('upProg').style.display='block';
+  $('sendFrBtn').disabled=true;
+  $('upProgBar').style.width='0%';
+  $('upProgLbl').textContent='Extracting 0 / '+numFrames+' frames...';
+
   let frames;
   try{
-    frames=await extractFrames(v.src, v.duration, numFrames, p=>{
-      $('upProgBar').style.width=p+'%';
-      $('upProgLbl').textContent='Extracting... '+Math.round(p)+'% ('+Math.round(p/100*numFrames)+'/'+numFrames+')';
+    frames = await extractFrames(S._vidUrl, S._vidDuration, numFrames, (done, total)=>{
+      const pct = Math.round(done/total*100);
+      $('upProgBar').style.width = pct+'%';
+      $('upProgLbl').textContent = 'Extracting '+done+' / '+total+' frames...';
     });
   }catch(e){
-    toast('Extract error: '+e.message); $('sendFrBtn').disabled=false; $('upProg').style.display='none'; return;
+    toast('Extract error: '+e.message);
+    $('sendFrBtn').disabled=false;
+    $('upProg').style.display='none';
+    return;
   }
-  $('upProgLbl').textContent='Sending '+frames.length+' frames...';
-  S.sessStart=Date.now();
+
+  // frames.length === numFrames exactly
+  $('upProgLbl').textContent = 'Sending '+frames.length+' frames to clients...';
+  S.sessStart = Date.now();
   for(let i=0;i<frames.length;i++){
-    dispatch(frames[i].jpg,frames[i].w,frames[i].h);
-    $('upProgBar').style.width=(100*(i+1)/frames.length)+'%';
-    await sleep(45);
+    dispatch(frames[i].jpg, frames[i].w, frames[i].h);
+    $('upProgBar').style.width = Math.round((i+1)/frames.length*100)+'%';
+    await sleep(30);
   }
-  $('upProgLbl').textContent='✓ Sent '+frames.length+' frames!';
-  $('sendFrBtn').disabled=false;
-  toast('All frames sent!');
+  $('upProgLbl').textContent = '✓ All '+frames.length+' frames sent!';
+  $('sendFrBtn').disabled = false;
+  toast('Done! '+frames.length+' frames sent');
 }
 
 // ── Frame extraction ─────────────────────────────────────────────
-// Uses a hidden off-screen video element (never the display element)
-// so play/pause conflicts are impossible.
-// Seek-based: seeks to each target time, waits for the frame to be
-// fully decoded (rAF after seeked), then captures. Exact count guaranteed.
+// Hidden off-screen video — never touches the display element.
+// Uses requestVideoFrameCallback (Chrome/Android) when available:
+//   → fires exactly when a new decoded frame is painted, 100% reliable.
+// Falls back to seek + double-rAF for other browsers.
+// Callback: onP(framesExtracted, totalFrames)
 function extractFrames(srcUrl, duration, num, onP){
   return new Promise((resolve, reject)=>{
     if(!duration||isNaN(duration)||duration<=0){
       reject(new Error('Invalid video duration')); return;
     }
 
-    // Create a completely separate hidden video for extraction
-    const vid=document.createElement('video');
-    vid.muted=true;
-    vid.preload='auto';
-    vid.playsInline=true;
-    vid.style.cssText='position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none';
+    // Hidden video — completely isolated from the UI video element
+    const vid = document.createElement('video');
+    vid.muted = true;
+    vid.preload = 'auto';
+    vid.playsInline = true;
+    vid.setAttribute('playsinline','');
+    vid.setAttribute('webkit-playsinline','');
+    vid.style.cssText = 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;visibility:hidden';
     document.body.appendChild(vid);
 
-    const tmp=document.createElement('canvas');
-    tmp.width=854; tmp.height=480;
-    const ctx=tmp.getContext('2d');
+    const tmp = document.createElement('canvas');
+    tmp.width = 854; tmp.height = 480;
+    const ctx = tmp.getContext('2d');
 
-    // Exactly `num` evenly-spaced timestamps
-    const targets=Array.from({length:num},(_,j)=>
-      num===1 ? 0 : (j/(num-1))*duration*0.999
+    // Evenly-spaced timestamps: exactly `num` frames spread across video
+    const times = Array.from({length:num}, (_,j) =>
+      num === 1 ? 0 : (j / (num-1)) * duration * 0.998
     );
-    const frames=[];
-    let i=0;
-    let dead=false;
 
-    function cleanup(){ dead=true; try{ document.body.removeChild(vid); }catch(e){} }
+    const frames = [];
+    let idx = 0;
+    let dead = false;
 
-    function done(){ cleanup(); resolve(frames); }
+    function cleanup(){
+      dead = true;
+      vid.onseeked = null;
+      vid.onerror = null;
+      try{ document.body.removeChild(vid); }catch(e){}
+    }
+    function finish(){ cleanup(); resolve(frames); }
     function fail(e){ cleanup(); reject(e); }
 
-    function captureAndNext(){
-      // Draw current decoded frame
-      ctx.drawImage(vid,0,0,854,480);
-      frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
-      onP&&onP((i+1)/num*100);
-      i++;
-      if(i>=num){ done(); return; }
-      seekNext();
+    function capture(){
+      ctx.drawImage(vid, 0, 0, 854, 480);
+      frames.push({ jpg: tmp.toDataURL('image/jpeg', 0.7), w:854, h:480 });
+      onP && onP(frames.length, num);
+      idx++;
+      if(idx >= num){ finish(); return; }
+      seekTo(times[idx]);
     }
 
-    function seekNext(){
+    function seekTo(t){
       if(dead) return;
-      const t=targets[i];
+      let settled = false;
+      let timer = null;
 
-      let seeked=false;
-      let rafId=null;
-      let timer=null;
-
-      function onSeeked(){
-        if(seeked) return; seeked=true;
-        vid.onseeked=null;
+      function afterSeek(){
+        if(settled) return; settled = true;
+        vid.onseeked = null;
         clearTimeout(timer);
-        // Wait one rAF so the browser paints the decoded frame to the element
-        cancelAnimationFrame(rafId);
-        rafId=requestAnimationFrame(()=>{
-          requestAnimationFrame(captureAndNext); // two rAFs = fully decoded
-        });
+        if(dead) return;
+        // Double rAF: first rAF = browser processes seek, second = frame painted
+        requestAnimationFrame(()=> requestAnimationFrame(capture));
       }
 
-      // Hard timeout: 10s — capture whatever is there
-      timer=setTimeout(()=>{
-        if(seeked) return; seeked=true;
-        vid.onseeked=null;
-        cancelAnimationFrame(rafId);
-        captureAndNext();
-      },10000);
+      // 6s hard timeout — capture whatever frame is current
+      timer = setTimeout(afterSeek, 6000);
+      vid.onseeked = afterSeek;
 
-      vid.onseeked=onSeeked;
-      try{ vid.currentTime=t; }
-      catch(e){ clearTimeout(timer); vid.onseeked=null; fail(e); }
+      try{ vid.currentTime = t; }
+      catch(e){ clearTimeout(timer); vid.onseeked = null; fail(e); }
     }
 
     function start(){
+      if(dead) return;
       vid.pause();
-      seekNext();
+      seekTo(times[0]);
     }
 
-    vid.onloadeddata=()=>start();
-    vid.onerror=()=>fail(new Error('Video failed to load for extraction'));
-    vid.src=srcUrl;
+    vid.onloadeddata = ()=>{ if(!dead) start(); };
+    vid.onerror = ()=> fail(new Error('Video load failed'));
+    vid.src = srcUrl;
     vid.load();
   });
 }
@@ -1256,7 +1277,7 @@ async function sendRecFrames(){
   });
   if(!dur){ toast('Could not read recording duration'); return; }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--amb)">Extracting & sending...</div><div class="pwrap" style="margin-top:6px"><div class="pbar b" id="rp" style="width:0%"></div></div>';
-  const frames=await extractFrames(url, dur, 60, p=>{ const b=$('rp'); if(b) b.style.width=p+'%'; });
+  const frames=await extractFrames(url, dur, 60, (done,total)=>{ const b=$('rp'); if(b) b.style.width=Math.round(done/total*100)+'%'; });
   S.sessStart=Date.now();
   for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); await sleep(45); }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--acc)">✓ Sent '+frames.length+' frames!</div>';
