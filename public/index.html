@@ -488,35 +488,10 @@ function cleanup(){
   });
 }
 
-function refreshServer(){
-  cleanup();
-  $('sCode').textContent='------'; $('sCode').className='scode pend';
-  $('sHint').textContent='Connecting...'; $('cpyBtn').style.display='none';
-  $('sDot').className='dot'; $('sCliList').innerHTML=''; $('sDetList').innerHTML='';
-  $('sCliSec').style.display='none'; $('sDetSec').style.display='none'; $('sResSec').style.display='none';
-  $('sCliCnt').textContent='0'; $('sFrSent').textContent='0'; $('sTotDet').textContent='0'; $('sAvgLat').textContent='0ms';
-  setStatus('s','Refreshing...','b');
-  initServer();
-}
+function refreshServer(){ window.location.reload(); }
 
-function refreshClient(){
-  const wasConnected=!!(S.ws && S.ws.readyState===WebSocket.OPEN && S.mode==='client');
-  clearInterval(S.healthTimer);
-  if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
-  Object.assign(S,{
-    ws:null, frDone:0, objFound:0, cliLats:[], cliEnergySum:0, myId:null, code:null, cliStart:0, schedData:{},
-  });
-  $('cDot').className='dot'; $('discBtn').style.display='none';
-  $('cVidSec').style.display='none'; $('cStatSec').style.display='none';
-  $('cDetSec').style.display='none';
-  $('cFrDone').textContent='0'; $('cObjFnd').textContent='0';
-  $('cAvgLat').textContent='0ms'; $('cEnergy').textContent='0.000000';
-  $('cDetList').innerHTML='';
-  resetJoin();
-  setStatus('c',S.modelOk?'Model ready — enter code':'Loading model...', S.modelOk?'g':'');
-  if(wasConnected) toast('Disconnected — enter code to reconnect');
-  else toast('Refreshed');
-}
+function refreshClient(){ window.location.reload(); }
+
 function stopStream(){ if(S.stream){ S.stream.getTracks().forEach(t=>t.stop()); S.stream=null; } }
 
 // ── WebSocket ─────────────────────────────────────────────────────
@@ -600,7 +575,6 @@ function onClientResult(clientId, msg){
   const cli=S.clients[clientId]; if(!cli) return;
   const lat=Date.now()-msg.ts;
   cli.frames++; cli.dets+=msg.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
-  // track per-scheduler latency on host side too
   if(msg.sched && cli.schedLats[msg.sched]){
     cli.schedLats[msg.sched].push(lat);
     cli.schedFrames[msg.sched]=(cli.schedFrames[msg.sched]||0)+1;
@@ -616,9 +590,7 @@ function onClientHealth(clientId, h){
   cli.health={...cli.health,...h}; updateClientUI(clientId);
 }
 
-// Called when a client sends its per-scheduler averaged results
 function onClientSchedResult(clientId, data){
-  // data = { greedy:{avgTime,avgLat,avgEnergy,frames}, pso:{...}, ... }
   S.clientResults[clientId] = data;
   S.clientResultsReceived.add(clientId);
   const totalClients = Object.keys(S.clients).length;
@@ -694,8 +666,6 @@ function dispatch(jpg,fw,fh){
 }
 
 // ── SERVER RESULTS ────────────────────────────────────────────────
-// Build final result table: sum of per-client averages per scheduler
-// + total completion time = sum of all frames' completion times across all clients
 function renderFinalResults(){
   const sec=$('sResSec'), tbody=$('sResTbody');
   if(!sec||!tbody) return;
@@ -705,8 +675,7 @@ function renderFinalResults(){
 
   const cols=['g','b','p','a'];
   let rows='';
-  let totalCompletionTime=0;
-  let totalLatencySum=0, totalEnergySum=0, totalSchedCount=0;
+  let totalCompletionTime=0, totalLatencySum=0, totalEnergySum=0, totalSchedCount=0;
 
   SCHEDS.forEach((sched,i)=>{
     let sumAvgTime=0, sumAvgLat=0, sumAvgEnergy=0, clientCount=0;
@@ -720,9 +689,7 @@ function renderFinalResults(){
       }
     });
     if(!clientCount) return;
-    // Total completion time for this scheduler = sum of all clients' avg completion times
-    const schedTotalTime = sumAvgTime;
-    totalCompletionTime += schedTotalTime;
+    totalCompletionTime += sumAvgTime;
     totalLatencySum     += sumAvgLat;
     totalEnergySum      += sumAvgEnergy;
     totalSchedCount++;
@@ -734,7 +701,6 @@ function renderFinalResults(){
     </tr>`;
   });
 
-  // Total row: sum across all schedulers
   const totTime  = totalCompletionTime.toFixed(4);
   const totLat   = totalSchedCount ? Math.round(totalLatencySum/totalSchedCount) : 0;
   const totEnergy= totalEnergySum.toFixed(6);
@@ -758,7 +724,6 @@ function updateSrvStats(){
 //  CLIENT — INIT & JOIN
 // ══════════════════════════════════════════════════════════════════
 async function initClient(){
-  // init per-scheduler tracking
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
   startHealthReporting();
   await loadModel();
@@ -839,17 +804,15 @@ function disconnectClient(){
   setStatus('c','Disconnected',''); resetJoin(); toast('Disconnected');
 }
 
-// Send per-scheduler averaged results to host
 function sendSchedResults(){
   if(!S.ws || S.ws.readyState!==WebSocket.OPEN) return;
   const result={};
   SCHEDS.forEach(sched=>{
     const d=S.schedData[sched];
     if(!d || !d.frames) return;
-    const avgLat  = d.lats.length ? Math.round(d.lats.reduce((a,b)=>a+b,0)/d.lats.length) : 0;
-    const avgEnergy = d.frames ? d.energySum/d.frames : 0;
-    // avgTime = average completion time per frame (lat in seconds)
-    const avgTime = d.lats.length ? (d.lats.reduce((a,b)=>a+b,0)/d.lats.length)/1000 : 0;
+    const avgLat   = d.lats.length ? Math.round(d.lats.reduce((a,b)=>a+b,0)/d.lats.length) : 0;
+    const avgEnergy= d.frames ? d.energySum/d.frames : 0;
+    const avgTime  = d.lats.length ? (d.lats.reduce((a,b)=>a+b,0)/d.lats.length)/1000 : 0;
     result[sched]={ avgTime, avgLat, avgEnergy, frames:d.frames };
   });
   wsSend({ type:'sched-result', code:S.code, clientId:S.myId, data:result });
@@ -876,25 +839,18 @@ async function handleFrame(data){
       ctx.fillStyle='rgba(77,143,255,.88)'; ctx.fillRect(x,y-18,ctx.measureText(lbl).width+8,18);
       ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x+4,y-5);
     });
-
-    // Track overall stats
     S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
     const frameEnergy=(POWER_W*(lat/1000))/1000;
     S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
-
-    // Track per-scheduler stats
     if(!S.schedData[sched]) S.schedData[sched]={ lats:[], energySum:0, frames:0 };
     S.schedData[sched].lats.push(lat);
     S.schedData[sched].energySum+=frameEnergy;
     S.schedData[sched].frames++;
-
     const avgEnergy=S.cliEnergySum/S.frDone;
     const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
     $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
-
-    // Send result back to host (includes which scheduler sent this frame)
     wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, sched, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
   };
   img.src=data.jpg;
@@ -1068,31 +1024,61 @@ async function sendUploadFrames(){
   for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); $('upProgBar').style.width=(100*(i+1)/frames.length)+'%'; await sleep(45); }
   $('upProgLbl').textContent='✓ Sent '+frames.length+' frames!'; $('sendFrBtn').disabled=false; toast('All frames sent!');
 }
+
+// ── Frame extraction — robust against mobile seek stalls ─────────
+// Uses vid.onseeked (single assignment, no listener accumulation).
+// On timeout, captures whatever frame is current rather than skipping.
 function extractFrames(vid,num,onP){
   return new Promise((resolve,reject)=>{
     const dur=vid.duration;
     if(!dur||isNaN(dur)){ reject(new Error('Invalid video duration')); return; }
     const frames=[],tmp=document.createElement('canvas');
+    tmp.width=854; tmp.height=480;
+    const ctx=tmp.getContext('2d');
     const times=Array.from({length:num},(_,j)=>(j/num)*dur*0.999);
-    let i=0;
+    let i=0, _seekTimer=null;
+
+    function captureFrame(){
+      ctx.drawImage(vid,0,0,854,480);
+      frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
+      onP&&onP((i+1)/times.length*100);
+      i++;
+      setTimeout(next,0);
+    }
+
     function next(){
       if(i>=times.length){ resolve(frames); return; }
-      const t=times[i]; let done=false;
-      const onSeeked=()=>{
-        if(done) return; done=true;
-        vid.removeEventListener('seeked',onSeeked); clearTimeout(seekTimeout);
-        tmp.width=854; tmp.height=480;
-        tmp.getContext('2d').drawImage(vid,0,0,854,480);
-        frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
-        onP&&onP((i+1)/times.length*100); i++; setTimeout(next,0);
+      const t=times[i];
+
+      // Already close enough — capture immediately without seeking
+      if(Math.abs(vid.currentTime-t)<0.05){ captureFrame(); return; }
+
+      vid.onseeked=null;
+      clearTimeout(_seekTimer);
+
+      vid.onseeked=()=>{
+        vid.onseeked=null;
+        clearTimeout(_seekTimer);
+        captureFrame();
       };
-      const seekTimeout=setTimeout(()=>{ if(!done){ done=true; vid.removeEventListener('seeked',onSeeked); i++; setTimeout(next,0); } },3000);
-      vid.addEventListener('seeked',onSeeked);
-      vid.currentTime=t;
+
+      // 8s timeout — capture current frame rather than skipping
+      _seekTimer=setTimeout(()=>{
+        vid.onseeked=null;
+        captureFrame();
+      },8000);
+
+      try{ vid.currentTime=t; }
+      catch(e){ vid.onseeked=null; clearTimeout(_seekTimer); i++; setTimeout(next,0); }
     }
-    if(vid.readyState>=2){ next(); } else{ vid.onloadeddata=()=>next(); }
+
+    function start(){ vid.pause(); next(); }
+
+    if(vid.readyState>=2){ start(); }
+    else{ vid.onloadeddata=()=>start(); vid.load(); }
   });
 }
+
 async function startRec(){
   try{
     S.stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'environment'},audio:false});
