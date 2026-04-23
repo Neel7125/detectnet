@@ -281,6 +281,15 @@ t e s t 
         <div id="upVidWrap" style="display:none;margin-top:9px">
           <video id="upVid" controls style="width:100%;max-height:200px;border-radius:var(--rs);background:#000"></video>
         </div>
+        <!-- Frame count selector — shown after video loads -->
+        <div id="upFrCtrl" style="display:none;margin-top:10px">
+          <div style="font-size:10px;font-family:var(--mono);color:var(--txt3);margin-bottom:5px">FRAMES TO PROCESS</div>
+          <div style="display:flex;align-items:center;gap:8px">
+            <div style="font-size:10px;font-family:var(--mono);color:var(--txt2)" id="upFrTotal"></div>
+            <input type="number" id="upFrInp" min="1" style="flex:1;background:var(--bg3);border:1px solid var(--bord2);border-radius:var(--rs);padding:8px 10px;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--acc);outline:none;text-align:center;-webkit-appearance:none;appearance:none" oninput="clampFrInp()">
+            <button class="btn btn-gh btn-sm" onclick="setFrMax()" style="white-space:nowrap">All</button>
+          </div>
+        </div>
         <div id="upProg" style="display:none;margin-top:7px">
           <div style="font-size:10px;font-family:var(--mono);color:var(--txt2)" id="upProgLbl">Extracting...</div>
           <div class="pwrap"><div class="pbar b" id="upProgBar" style="width:0%"></div></div>
@@ -583,6 +592,8 @@ function onClientResult(clientId, msg){
   updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
   if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
   updateSrvStats();
+  // Build live results from data host already has
+  buildLiveResults();
 }
 
 function onClientHealth(clientId, h){
@@ -596,6 +607,32 @@ function onClientSchedResult(clientId, data){
   const totalClients = Object.keys(S.clients).length;
   const received = S.clientResultsReceived.size;
   $('sResSubtitle').textContent = received+'/'+totalClients+' client(s) reported';
+  renderFinalResults();
+}
+
+// Build results live from per-scheduler latency data the host already tracks
+function buildLiveResults(){
+  const cids=Object.keys(S.clients);
+  if(!cids.length) return;
+  const result={};
+  SCHEDS.forEach(sched=>{
+    let totalLat=0, totalFrames=0;
+    cids.forEach(cid=>{
+      const cli=S.clients[cid];
+      const lats=cli.schedLats[sched]||[];
+      if(lats.length){
+        totalLat+=lats.reduce((a,b)=>a+b,0);
+        totalFrames+=lats.length;
+      }
+    });
+    if(!totalFrames) return;
+    const avgLat=Math.round(totalLat/totalFrames);
+    const avgTime=avgLat/1000;
+    const avgEnergy=(POWER_W*avgTime)/1000;
+    result[sched]={ avgTime, avgLat, avgEnergy, frames:totalFrames };
+  });
+  // Merge into clientResults under a synthetic 'live' key
+  S.clientResults['__live__']=result;
   renderFinalResults();
 }
 
@@ -669,9 +706,20 @@ function dispatch(jpg,fw,fh){
 function renderFinalResults(){
   const sec=$('sResSec'), tbody=$('sResTbody');
   if(!sec||!tbody) return;
-  const clientIds=Object.keys(S.clientResults);
-  if(!clientIds.length) return;
+
+  // Prefer actual client-reported results; fall back to live host-side data
+  const reportedIds=Object.keys(S.clientResults).filter(k=>k!=='__live__');
+  const useReported=reportedIds.length>0;
+  const sourceIds=useReported ? reportedIds : (S.clientResults['__live__'] ? ['__live__'] : []);
+  if(!sourceIds.length) return;
+
   sec.style.display='block';
+  if(useReported){
+    const total=Object.keys(S.clients).length;
+    $('sResSubtitle').textContent=reportedIds.length+'/'+total+' client(s) reported (final)';
+  } else {
+    $('sResSubtitle').textContent='Live — updating as frames arrive';
+  }
 
   const cols=['g','b','p','a'];
   let rows='';
@@ -679,15 +727,27 @@ function renderFinalResults(){
 
   SCHEDS.forEach((sched,i)=>{
     let sumAvgTime=0, sumAvgLat=0, sumAvgEnergy=0, clientCount=0;
-    clientIds.forEach(cid=>{
-      const cr=S.clientResults[cid];
-      if(cr && cr[sched]){
-        sumAvgTime   += cr[sched].avgTime   || 0;
-        sumAvgLat    += cr[sched].avgLat    || 0;
-        sumAvgEnergy += cr[sched].avgEnergy || 0;
-        clientCount++;
+
+    if(useReported){
+      reportedIds.forEach(cid=>{
+        const cr=S.clientResults[cid];
+        if(cr && cr[sched]){
+          sumAvgTime   += cr[sched].avgTime   || 0;
+          sumAvgLat    += cr[sched].avgLat    || 0;
+          sumAvgEnergy += cr[sched].avgEnergy || 0;
+          clientCount++;
+        }
+      });
+    } else {
+      const live=S.clientResults['__live__'];
+      if(live && live[sched]){
+        sumAvgTime   = live[sched].avgTime   || 0;
+        sumAvgLat    = live[sched].avgLat    || 0;
+        sumAvgEnergy = live[sched].avgEnergy || 0;
+        clientCount  = 1;
       }
-    });
+    }
+
     if(!clientCount) return;
     totalCompletionTime += sumAvgTime;
     totalLatencySum     += sumAvgLat;
@@ -701,6 +761,7 @@ function renderFinalResults(){
     </tr>`;
   });
 
+  if(!rows) return;
   const totTime  = totalCompletionTime.toFixed(4);
   const totLat   = totalSchedCount ? Math.round(totalLatencySum/totalSchedCount) : 0;
   const totEnergy= totalEnergySum.toFixed(6);
@@ -852,6 +913,8 @@ async function handleFrame(data){
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
     wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, sched, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
+    // Send scheduler averages to host every 10 frames so results update live
+    if(S.frDone%10===0) sendSchedResults();
   };
   img.src=data.jpg;
 }
@@ -1006,16 +1069,43 @@ function loadVideo(inp){
   const f=inp.files[0]; if(!f) return;
   $('upLabel').textContent=f.name;
   $('upVidWrap').style.display='block';
-  $('upVid').src=URL.createObjectURL(f); $('upVid').load();
-  $('sendFrBtn').style.display='block'; toast('Video loaded');
+  const v=$('upVid');
+  v.src=URL.createObjectURL(f);
+  v.onloadedmetadata=()=>{
+    const dur=v.duration||0;
+    // Estimate total frames at 30fps (conservative — actual may vary)
+    const estFrames=Math.max(1,Math.round(dur*30));
+    // Default extract count: min(300, total) — sensible default
+    const defCount=Math.min(300,estFrames);
+    $('upFrTotal').textContent='Total ~'+estFrames+' frames';
+    $('upFrInp').max=estFrames;
+    $('upFrInp').value=defCount;
+    $('upFrCtrl').style.display='block';
+    $('sendFrBtn').style.display='block';
+  };
+  v.load();
+  toast('Video loaded');
+}
+function clampFrInp(){
+  const inp=$('upFrInp');
+  const max=parseInt(inp.max)||9999;
+  let v=parseInt(inp.value)||1;
+  if(v<1) v=1;
+  if(v>max) v=max;
+  inp.value=v;
+}
+function setFrMax(){
+  const inp=$('upFrInp');
+  inp.value=inp.max||300;
 }
 async function sendUploadFrames(){
   const v=$('upVid'); if(!v.src||!v.duration){ toast('No video loaded'); return; }
   if(!Object.keys(S.clients).length){ toast('No clients connected'); return; }
+  const numFrames=Math.max(1,parseInt($('upFrInp').value)||60);
   $('upProg').style.display='block'; $('sendFrBtn').disabled=true;
   let frames;
   try{
-    frames=await extractFrames(v,60,p=>{ $('upProgBar').style.width=p+'%'; $('upProgLbl').textContent='Extracting... '+Math.round(p)+'%'; });
+    frames=await extractFrames(v,numFrames,p=>{ $('upProgBar').style.width=p+'%'; $('upProgLbl').textContent='Extracting... '+Math.round(p)+'%'; });
   }catch(e){
     toast('Extract error: '+e.message); $('sendFrBtn').disabled=false; $('upProg').style.display='none'; return;
   }
@@ -1025,54 +1115,58 @@ async function sendUploadFrames(){
   $('upProgLbl').textContent='✓ Sent '+frames.length+' frames!'; $('sendFrBtn').disabled=false; toast('All frames sent!');
 }
 
-// ── Frame extraction — robust against mobile seek stalls ─────────
-// Uses vid.onseeked (single assignment, no listener accumulation).
-// On timeout, captures whatever frame is current rather than skipping.
+// ── Frame extraction — play-through method, no seeking stalls ────
+// Plays the video at 16x speed, captures frames at evenly-spaced
+// time intervals using requestAnimationFrame. Completely avoids
+// the seek-stall problem on mobile browsers.
 function extractFrames(vid,num,onP){
   return new Promise((resolve,reject)=>{
     const dur=vid.duration;
-    if(!dur||isNaN(dur)){ reject(new Error('Invalid video duration')); return; }
-    const frames=[],tmp=document.createElement('canvas');
+    if(!dur||isNaN(dur)||dur<=0){ reject(new Error('Invalid video duration')); return; }
+
+    const frames=[];
+    const tmp=document.createElement('canvas');
     tmp.width=854; tmp.height=480;
     const ctx=tmp.getContext('2d');
-    const times=Array.from({length:num},(_,j)=>(j/num)*dur*0.999);
-    let i=0, _seekTimer=null;
 
-    function captureFrame(){
-      ctx.drawImage(vid,0,0,854,480);
-      frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
-      onP&&onP((i+1)/times.length*100);
-      i++;
-      setTimeout(next,0);
+    // Evenly-spaced target times across the video
+    const targets=Array.from({length:num},(_,j)=>(j/(num-1||1))*dur*0.999);
+    let tIdx=0;
+    let rafId=null;
+    let done=false;
+
+    function finish(){
+      if(done) return; done=true;
+      vid.pause();
+      vid.ontimeupdate=null;
+      vid.onended=null;
+      cancelAnimationFrame(rafId);
+      resolve(frames);
     }
 
-    function next(){
-      if(i>=times.length){ resolve(frames); return; }
-      const t=times[i];
+    function tick(){
+      if(done) return;
+      const ct=vid.currentTime;
 
-      // Already close enough — capture immediately without seeking
-      if(Math.abs(vid.currentTime-t)<0.05){ captureFrame(); return; }
+      // Capture all targets that we've passed
+      while(tIdx<targets.length && ct>=targets[tIdx]){
+        ctx.drawImage(vid,0,0,854,480);
+        frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
+        onP&&onP((tIdx+1)/targets.length*100);
+        tIdx++;
+      }
 
-      vid.onseeked=null;
-      clearTimeout(_seekTimer);
-
-      vid.onseeked=()=>{
-        vid.onseeked=null;
-        clearTimeout(_seekTimer);
-        captureFrame();
-      };
-
-      // 8s timeout — capture current frame rather than skipping
-      _seekTimer=setTimeout(()=>{
-        vid.onseeked=null;
-        captureFrame();
-      },8000);
-
-      try{ vid.currentTime=t; }
-      catch(e){ vid.onseeked=null; clearTimeout(_seekTimer); i++; setTimeout(next,0); }
+      if(tIdx>=targets.length){ finish(); return; }
+      rafId=requestAnimationFrame(tick);
     }
 
-    function start(){ vid.pause(); next(); }
+    function start(){
+      vid.muted=true;
+      vid.playbackRate=16; // fast-forward — still fires timeupdate/rAF
+      vid.currentTime=0;
+      vid.onended=()=>{ tick(); finish(); }; // capture any remaining on end
+      vid.play().then(()=>{ rafId=requestAnimationFrame(tick); }).catch(e=>reject(e));
+    }
 
     if(vid.readyState>=2){ start(); }
     else{ vid.onloadeddata=()=>start(); vid.load(); }
