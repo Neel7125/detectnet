@@ -429,6 +429,7 @@ t e s t 
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
+<script src="/results.js"></script>
 <script>
 'use strict';
 
@@ -538,6 +539,7 @@ function startWSPing(){
 function initServer(){
   S.myId = 'host-'+uid();
   S.code = genCode();
+  RES.hostReset();
   setStatus('s','Connecting to server...','b');
 
   connectWS(
@@ -604,58 +606,12 @@ function onClientHealth(clientId, h){
 
 // Called when a client sends its per-scheduler averages
 function onClientSchedResult(clientId, data){
-  console.log('[Host] sched-result from', clientId, JSON.stringify(data));
-  if(!data || typeof data !== 'object'){ console.warn('[Host] bad sched-result data'); return; }
-  S.clientResults[clientId] = data;
-  renderFinalResults();
+  RES.hostReceive(clientId, data);
+  RES.hostRender();
 }
 
 function renderFinalResults(){
-  const sec=$('sResSec'), tbody=$('sResTbody');
-  const reportedIds = Object.keys(S.clientResults);
-  console.log('[Host] renderFinalResults reportedIds=', reportedIds);
-  if(!reportedIds.length) return;
-
-  const COLS=['g','b','p','a'];
-  let rows='', totTime=0, totLat=0, totEnergy=0, schedCount=0;
-
-  SCHEDS.forEach(function(sched,i){
-    var sumTime=0, sumLat=0, sumEnergy=0, found=false;
-    reportedIds.forEach(function(cid){
-      var sd = S.clientResults[cid] && S.clientResults[cid][sched];
-      console.log('[Host] sched='+sched+' cid='+cid+' sd='+JSON.stringify(sd));
-      if(sd && sd.frames > 0){
-        sumTime   += sd.avgTime   || 0;
-        sumLat    += sd.avgLat    || 0;
-        sumEnergy += sd.avgEnergy || 0;
-        found = true;
-      }
-    });
-    if(!found) return;
-    totTime+=sumTime; totLat+=sumLat; totEnergy+=sumEnergy; schedCount++;
-    rows += '<tr>'
-      + '<td class="'+COLS[i]+'">'+SCHED_NAMES[sched]+'</td>'
-      + '<td class="bld">'+sumTime.toFixed(4)+'s</td>'
-      + '<td>'+sumLat.toFixed(1)+'ms</td>'
-      + '<td>'+sumEnergy.toFixed(6)+'KJ</td>'
-      + '</tr>';
-  });
-
-  console.log('[Host] schedCount='+schedCount);
-  if(!schedCount) return;
-
-  rows += '<tr class="tot">'
-    + '<td>TOTAL</td>'
-    + '<td>'+totTime.toFixed(4)+'s</td>'
-    + '<td>'+totLat.toFixed(1)+'ms</td>'
-    + '<td>'+totEnergy.toFixed(6)+'KJ</td>'
-    + '</tr>';
-
-  tbody.innerHTML = rows;
-  var totalClients = Object.keys(S.clients).length || reportedIds.length;
-  $('sResSubtitle').textContent = reportedIds.length+'/'+totalClients+' client(s) reported';
-  sec.style.display = 'block';
-  console.log('[Host] results table rendered');
+  RES.hostRender();
 }
 function hScore(cli){
   const h=cli.health||{};
@@ -734,6 +690,7 @@ function updateSrvStats(){
 //  CLIENT — INIT & JOIN
 // ══════════════════════════════════════════════════════════════════
 async function initClient(){
+  RES.clientReset();
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
   startHealthReporting();
   await loadModel();
@@ -769,6 +726,7 @@ function joinSession(){
 
   S.myId = 'cli-'+uid();
   S.code = code;
+  RES.clientReset();
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
 
   connectWS(
@@ -818,19 +776,7 @@ function disconnectClient(){
 }
 
 function sendSchedResults(){
-  if(!S.ws || S.ws.readyState!==WebSocket.OPEN){ console.warn('[Client] sendSchedResults: WS not open'); return; }
-  const result={};
-  SCHEDS.forEach(sched=>{
-    const d=S.schedData[sched];
-    if(!d || !d.frames) return;
-    const avgLat    = d.lats.reduce((a,b)=>a+b,0)/d.lats.length;
-    const avgTime   = avgLat/1000;
-    const avgEnergy = d.energySum/d.frames;
-    result[sched]={ avgTime, avgLat, avgEnergy, frames:d.frames };
-  });
-  if(!Object.keys(result).length){ console.warn('[Client] sendSchedResults: no data yet'); return; }
-  console.log('[Client] sending sched-result', JSON.stringify(result));
-  wsSend({ type:'sched-result', code:S.code, clientId:S.myId, data:result });
+  RES.clientSend(S.ws, S.code, S.myId);
 }
 
 async function handleFrame(data){
@@ -855,11 +801,8 @@ async function handleFrame(data){
     const frameTime   = lat/1000;                    // seconds
     const frameEnergy = (POWER_W*frameTime)/1000;    // KJ
 
-    // Accumulate into per-scheduler buckets
-    if(!S.schedData[sched]) S.schedData[sched]={ lats:[], energySum:0, frames:0 };
-    S.schedData[sched].lats.push(lat);
-    S.schedData[sched].energySum += frameEnergy;
-    S.schedData[sched].frames++;
+    // Accumulate into per-scheduler buckets (via RES module)
+    RES.clientFrame(sched, lat, frameEnergy);
 
     // Overall client counters (for display only)
     S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
