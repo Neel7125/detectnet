@@ -429,7 +429,93 @@ t e s t 
 
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
-<script src="/results.js"></script>
+<script>
+// ── RES module — inline (vercel rewrites block external .js files) ──
+var RES = (function() {
+  var schedData = {};
+  var SCHEDS = ['greedy','pso','mompso','mompso-ga'];
+
+  function clientReset() {
+    schedData = {};
+    SCHEDS.forEach(function(s){ schedData[s]={ lats:[], energySum:0, frames:0 }; });
+  }
+
+  function clientFrame(sched, latMs, energyKJ) {
+    if(!schedData[sched]) schedData[sched]={ lats:[], energySum:0, frames:0 };
+    schedData[sched].lats.push(latMs);
+    schedData[sched].energySum += energyKJ;
+    schedData[sched].frames++;
+  }
+
+  function clientSend(ws, code, myId) {
+    if(!ws || ws.readyState !== 1) return;
+    var payload = {}, hasAny = false;
+    SCHEDS.forEach(function(sched){
+      var d = schedData[sched];
+      if(!d || d.frames === 0) return;
+      var sumLat = 0;
+      for(var i=0;i<d.lats.length;i++) sumLat += d.lats[i];
+      var avgLat    = sumLat / d.lats.length;
+      payload[sched] = { avgLat: avgLat, avgTime: avgLat/1000, avgEnergy: d.energySum/d.frames, frames: d.frames };
+      hasAny = true;
+    });
+    if(!hasAny) return;
+    try{ ws.send(JSON.stringify({ type:'sched-result', code:code, clientId:myId, data:payload })); }catch(e){}
+  }
+
+  var clientResults = {};
+
+  function hostReset() { clientResults = {}; }
+
+  function hostReceive(clientId, data) {
+    if(!clientId || !data || typeof data !== 'object') return;
+    clientResults[clientId] = data;
+  }
+
+  function hostRender() {
+    var sec     = document.getElementById('sResSec');
+    var tbody   = document.getElementById('sResTbody');
+    var sub     = document.getElementById('sResSubtitle');
+    if(!sec || !tbody) return;
+    var ids = Object.keys(clientResults);
+    if(!ids.length) return;
+    var NAMES  = { greedy:'Greedy', pso:'PSO', mompso:'MOMPSO', 'mompso-ga':'MOMPSO-GA' };
+    var COLORS = { greedy:'g', pso:'b', mompso:'p', 'mompso-ga':'a' };
+    var html = '', totTime=0, totLat=0, totEnergy=0, schedCount=0;
+    SCHEDS.forEach(function(sched){
+      var sumTime=0, sumLat=0, sumEnergy=0, found=false;
+      ids.forEach(function(cid){
+        var d = clientResults[cid] && clientResults[cid][sched];
+        if(d && d.frames > 0){
+          sumTime   += d.avgTime;
+          sumLat    += d.avgLat;
+          sumEnergy += d.avgEnergy;
+          found = true;
+        }
+      });
+      if(!found) return;
+      totTime+=sumTime; totLat+=sumLat; totEnergy+=sumEnergy; schedCount++;
+      html += '<tr>'
+        +'<td class="'+COLORS[sched]+'">'+NAMES[sched]+'</td>'
+        +'<td class="bld">'+sumTime.toFixed(4)+'s</td>'
+        +'<td>'+sumLat.toFixed(1)+'ms</td>'
+        +'<td>'+sumEnergy.toFixed(6)+'KJ</td>'
+        +'</tr>';
+    });
+    if(!schedCount) return;
+    html += '<tr class="tot"><td>TOTAL</td>'
+      +'<td>'+totTime.toFixed(4)+'s</td>'
+      +'<td>'+totLat.toFixed(1)+'ms</td>'
+      +'<td>'+totEnergy.toFixed(6)+'KJ</td>'
+      +'</tr>';
+    tbody.innerHTML = html;
+    if(sub) sub.textContent = ids.length+' client(s) reported';
+    sec.style.display = 'block';
+  }
+
+  return { clientReset:clientReset, clientFrame:clientFrame, clientSend:clientSend, hostReset:hostReset, hostReceive:hostReceive, hostRender:hostRender };
+})();
+</script>
 <script>
 'use strict';
 
