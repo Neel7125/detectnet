@@ -343,10 +343,10 @@ t e s t 
       <div id="sCliList"></div>
     </div>
 
-    <!-- Frame Distribution — shown after sending completes -->
-    <div class="card" id="sFrameDistSec" style="display:none">
+    <!-- Frame Distribution -->
+    <div class="card" id="sFrameDistSec">
       <div class="lbl">Frames Per Client</div>
-      <div id="sFrameDistList"></div>
+      <div id="sFrameDistList" style="font-size:11px;font-family:var(--mono);color:var(--txt3)">Waiting...</div>
     </div>
 
     <div id="sDetSec" style="display:none">
@@ -698,6 +698,7 @@ function onClientResult(clientId, msg){
   if(dets.length) drawSrvBoxes(dets,msg.fw,msg.fh);
   updateSrvStats();
   renderFinalResults();
+  showClientFrameSummary();
 }
 
 function onClientHealth(clientId, h){
@@ -764,7 +765,6 @@ function renderFinalResults(){
 
   tbody.innerHTML = html;
   if(sub) sub.textContent = cids.length+' client(s) · live';
-  showClientFrameSummary();
 
   // per-client frame breakdown
   const cliFramesEl = document.getElementById('sCliFrames');
@@ -1397,20 +1397,18 @@ function copyCode(){ navigator.clipboard?.writeText(S.code).then(()=>toast('Code
 function updateCliCount(){ const n=Object.keys(S.clients).length; $('sCliCnt').textContent=n; $('sCliSec').style.display=n?'block':'none'; }
 
 function showClientFrameSummary(){
-  const sec = document.getElementById('sFrameDistSec');
   const list = document.getElementById('sFrameDistList');
-  if(!sec || !list) return;
+  if(!list) return;
   const cids = Object.keys(S.clients);
-  if(!cids.length){ sec.style.display='none'; return; }
+  if(!cids.length){ list.innerHTML='<span style="color:var(--txt3)">No clients</span>'; return; }
   list.innerHTML = cids.map(function(id){
     const cli = S.clients[id];
-    const frames = Math.floor(cli.frames / 4);
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--bord)">'
-      + '<span style="font-size:13px;font-weight:700;color:var(--txt)">'+cli.name+'</span>'
-      + '<span style="font-size:14px;font-family:var(--mono);color:var(--acc);font-weight:700">'+frames+' frames</span>'
-      + '</div>';
+    const f = Math.floor(cli.frames / 4);
+    return '<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--bord)">'
+      +'<span style="font-size:13px;font-weight:700;color:var(--txt)">'+cli.name+'</span>'
+      +'<span style="font-size:13px;font-family:var(--mono);color:var(--acc);font-weight:700">'+f+' frames</span>'
+      +'</div>';
   }).join('');
-  sec.style.display = 'block';
 }
 function addClientUI(id){
   const cli=S.clients[id],s=sid(id),el=document.createElement('div'); el.className='cliitem'; el.id='cli-'+s;
