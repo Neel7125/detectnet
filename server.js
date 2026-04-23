@@ -105,9 +105,17 @@ wss.on('connection', (ws) => {
     if (type === 'result') {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'client') return;
-      // payload is in data.* (nested)
       const d = data || {};
-      send(session.hostWs, { type: 'result', from: ws._id, ts: d.ts, dets: d.dets, fw: d.fw, fh: d.fh });
+      send(session.hostWs, { type: 'result', from: ws._id, ts: d.ts, dets: d.dets, fw: d.fw, fh: d.fh, sched: d.sched });
+      return;
+    }
+
+    // ── SCHED-RESULT: client sends per-scheduler averages → host ─
+    if (type === 'sched-result') {
+      const session = sessions.get(ws._code);
+      if (!session || ws._role !== 'client') return;
+      const d = data || {};
+      send(session.hostWs, { type: 'sched-result', from: ws._id, data: d });
       return;
     }
 

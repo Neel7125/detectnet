@@ -104,7 +104,7 @@ body{color:var(--txt);font-family:var(--disp)}
 .vbadge.live{border-color:rgba(0,255,136,.45);color:var(--acc)}
 .vbadge.rec{border-color:rgba(255,68,102,.45);color:var(--red)}
 .vtr{position:absolute;top:9px;right:9px;z-index:10}
-.vsel{background:rgba(0,0,0,.72);border:1px solid var(--bord2);border-radius:7px;padding:4px 7px;font-family:var(--mono);font-size:10px;color:var(--txt);appearance:none;-webkit-appearance:none;cursor:pointer}
+.vsel{background:rgba(0,0,0,.72);border:1px solid var(--bord2);border-radius:7px;padding:4px 7px;font-family:var(--mono);font-size:10px;color:var(--txt);-webkit-appearance:none;appearance:none;cursor:pointer}
 .novid{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:6px;color:var(--txt3);font-family:var(--mono);font-size:11px}
 .novid .ico{font-size:26px;margin-bottom:4px}
 
@@ -181,6 +181,9 @@ body{color:var(--txt);font-family:var(--disp)}
 </style>
 </head>
 <body>
+t e s t 
+ 
+ 
 
 <!-- ═══ HOME ═══ -->
 <div id="home" class="scr on">
@@ -208,12 +211,12 @@ body{color:var(--txt);font-family:var(--disp)}
   <div class="mcards">
     <div class="mc srv" onclick="goServer()">
       <div class="mc-ico">📡</div><h2>Host Session</h2>
-      <p>Stream camera or upload video. Distribute frames to clients using advanced AI schedulers.</p>
+      <p>Stream camera or upload video. Distribute frames to clients using all 4 AI schedulers simultaneously.</p>
       <div class="arr">↗</div>
     </div>
     <div class="mc cli" onclick="goClient()">
       <div class="mc-ico">🔗</div><h2>Join Session</h2>
-      <p>Enter a 6-char code. Run on-device COCO-SSD object detection and report health metrics.</p>
+      <p>Enter a 6-char code. Run on-device COCO-SSD object detection and report metrics per scheduler.</p>
       <div class="arr">↗</div>
     </div>
   </div>
@@ -294,7 +297,7 @@ body{color:var(--txt);font-family:var(--disp)}
         </div>
         <div style="display:flex;gap:8px;margin-top:9px">
           <button class="btn btn-g btn-sm" id="startRecBtn" onclick="startRec()" style="flex:1">Start Recording</button>
-          <button class="btn btn-r btn-sm" id="stopRecBtn" onclick="stopRec()" style="flex:1;display:none">Stop & Save</button>
+          <button class="btn btn-r btn-sm" id="stopRecBtn" onclick="stopRec()" style="flex:1;display:none">Stop &amp; Save</button>
         </div>
         <div id="recReady" style="display:none;margin-top:9px">
           <div style="font-size:11px;font-family:var(--mono);color:var(--acc);margin-bottom:7px">✓ Recording ready</div>
@@ -303,14 +306,15 @@ body{color:var(--txt);font-family:var(--disp)}
       </div>
     </div>
 
-    <!-- Scheduler -->
+    <!-- Scheduler info (display only — all 4 run simultaneously) -->
     <div class="card">
-      <div class="lbl">Task Scheduler</div>
+      <div class="lbl">Task Schedulers</div>
+      <div style="font-size:10px;font-family:var(--mono);color:var(--txt2);margin-bottom:8px">All 4 schedulers run simultaneously. Each frame is dispatched by every scheduler independently.</div>
       <div class="schgrid">
-        <div class="schip on" id="chip-greedy" onclick="setSched('greedy',this)"><div class="sn">Greedy</div><div class="sd">Best health now</div></div>
-        <div class="schip" id="chip-pso" onclick="setSched('pso',this)"><div class="sn">PSO</div><div class="sd">Particle Swarm</div></div>
-        <div class="schip" id="chip-mompso" onclick="setSched('mompso',this)"><div class="sn">MOMPSO</div><div class="sd">Multi-Obj PSO</div></div>
-        <div class="schip" id="chip-mompso-ga" onclick="setSched('mompso-ga',this)"><div class="sn">MOMPSO-GA</div><div class="sd">PSO + Genetic</div></div>
+        <div class="schip on"><div class="sn">Greedy</div><div class="sd">Best health now</div></div>
+        <div class="schip on" style="background:var(--blue-d);border-color:rgba(77,143,255,.28);color:var(--blue)"><div class="sn">PSO</div><div class="sd">Particle Swarm</div></div>
+        <div class="schip on" style="background:rgba(170,102,255,.1);border-color:rgba(170,102,255,.28);color:var(--pur)"><div class="sn">MOMPSO</div><div class="sd">Multi-Obj PSO</div></div>
+        <div class="schip on" style="background:rgba(255,170,0,.1);border-color:rgba(255,170,0,.28);color:var(--amb)"><div class="sn">MOMPSO-GA</div><div class="sd">PSO + Genetic</div></div>
       </div>
     </div>
 
@@ -335,9 +339,16 @@ body{color:var(--txt);font-family:var(--disp)}
       <div class="detscr" id="sDetList"></div>
     </div>
 
+    <!-- Scheduler Results — host only -->
     <div class="card" id="sResSec" style="display:none">
       <div class="sechd"><span class="sect">Scheduler Results</span></div>
-      <div style="overflow-x:auto"><table class="rtbl"><thead><tr><th>Scheduler</th><th>Time(s)</th><th>Lat(ms)</th><th>Energy(KJ)</th></tr></thead><tbody id="sResTbody"></tbody></table></div>
+      <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);margin-bottom:8px" id="sResSubtitle"></div>
+      <div style="overflow-x:auto">
+        <table class="rtbl">
+          <thead><tr><th>Scheduler</th><th>Compl.Time(s)</th><th>Latency(ms)</th><th>Energy(KJ)</th></tr></thead>
+          <tbody id="sResTbody"></tbody>
+        </table>
+      </div>
     </div>
     <div style="height:10px"></div>
   </div>
@@ -393,10 +404,6 @@ body{color:var(--txt);font-family:var(--disp)}
       <div class="detscr" id="cDetList"></div>
     </div>
 
-    <div class="card" id="cResSec" style="display:none">
-      <div class="sechd"><span class="sect">Cluster Results</span></div>
-      <div style="overflow-x:auto"><table class="rtbl"><thead><tr><th>Scheduler</th><th>Time(s)</th><th>Lat(ms)</th><th>Energy(KJ)</th></tr></thead><tbody id="cResTbody"></tbody></table></div>
-    </div>
     <div style="height:10px"></div>
   </div>
   <div class="strip">
@@ -411,33 +418,41 @@ body{color:var(--txt);font-family:var(--disp)}
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
 <script>
 'use strict';
+
 // ══════════════════════════════════════════════════════════════════
-//  DetectNet Pro — WebSocket relay (no WebRTC P2P, no polling)
-//  All data flows through the WS server: signaling + frames + results
-//  Deploy server.js on Railway/Render, set WS_URL below.
+//  DetectNet Pro — All schedulers run on host simultaneously
+//  Each frame is dispatched by ALL 4 schedulers independently.
+//  Client tracks per-frame metrics per scheduler, sends averages.
+//  Host aggregates all clients → final result table.
 // ══════════════════════════════════════════════════════════════════
 
-// ▼▼▼ SET THIS to your Railway/Render WebSocket server URL ▼▼▼
 const WS_URL = 'wss://web-production-067c7.up.railway.app';
-// ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
 
 const POWER_W    = 15;
 const CAPTURE_MS = 220;
 const RES = { '240':{w:426,h:240}, '480':{w:854,h:480}, '720':{w:1280,h:720} };
+const SCHEDS = ['greedy','pso','mompso','mompso-ga'];
+const SCHED_NAMES = {greedy:'Greedy',pso:'PSO',mompso:'MOMPSO','mompso-ga':'MOMPSO-GA'};
 
 // ── STATE ─────────────────────────────────────────────────────────
 const S = {
   mode:null, myId:null, code:null,
-  // server
-  ws:null,          // WebSocket connection
-  clients:{},       // clientId -> metadata
-  vidMode:'live', sched:'greedy', res:RES['480'],
+  ws:null,
+  clients:{},       // clientId -> { name, health, frames, dets, lats, pend, schedLats:{}, schedFrames:{} }
+  vidMode:'live', res:RES['480'],
   stream:null, capTimer:null,
   sent:0, totalDet:0, lats:[], sessStart:0,
   recording:false, mr:null, recChunks:[], recBlob:null,
-  // client
+  // per-scheduler frame counters on host (round-robin index per sched)
+  schedSent:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
+  // aggregated results from clients: { schedName: { sumTime, sumLat, sumEnergy, count } }
+  clientResults:{},
+  clientResultsReceived: new Set(),
+  // client side
   model:null, modelOk:false,
   frDone:0, objFound:0, cliLats:[], cliEnergySum:0, cliStart:0,
+  // per-scheduler tracking on client: { schedName: { lats:[], energySum, frames } }
+  schedData:{},
   healthTimer:null,
 };
 
@@ -465,7 +480,10 @@ function cleanup(){
   Object.assign(S,{
     ws:null, clients:{}, stream:null, capTimer:null,
     sent:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
+    schedSent:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
+    clientResults:{}, clientResultsReceived: new Set(),
     frDone:0,objFound:0,cliLats:[],cliEnergySum:0,
+    schedData:{},
     myId:null,code:null,
   });
 }
@@ -486,14 +504,14 @@ function refreshClient(){
   clearInterval(S.healthTimer);
   if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
   Object.assign(S,{
-    ws:null, frDone:0, objFound:0, cliLats:[], cliEnergySum:0, myId:null, code:null, cliStart:0,
+    ws:null, frDone:0, objFound:0, cliLats:[], cliEnergySum:0, myId:null, code:null, cliStart:0, schedData:{},
   });
   $('cDot').className='dot'; $('discBtn').style.display='none';
   $('cVidSec').style.display='none'; $('cStatSec').style.display='none';
-  $('cDetSec').style.display='none'; $('cResSec').style.display='none';
+  $('cDetSec').style.display='none';
   $('cFrDone').textContent='0'; $('cObjFnd').textContent='0';
   $('cAvgLat').textContent='0ms'; $('cEnergy').textContent='0.000000';
-  $('cDetList').innerHTML=''; $('cResTbody').innerHTML='';
+  $('cDetList').innerHTML='';
   resetJoin();
   setStatus('c',S.modelOk?'Model ready — enter code':'Loading model...', S.modelOk?'g':'');
   if(wasConnected) toast('Disconnected — enter code to reconnect');
@@ -501,13 +519,12 @@ function refreshClient(){
 }
 function stopStream(){ if(S.stream){ S.stream.getTracks().forEach(t=>t.stop()); S.stream=null; } }
 
-// ── WebSocket connection ───────────────────────────────────────────
+// ── WebSocket ─────────────────────────────────────────────────────
 function wsSend(obj){
   if(S.ws && S.ws.readyState===WebSocket.OPEN){
     try{ S.ws.send(JSON.stringify(obj)); }catch(e){}
   }
 }
-
 function connectWS(onOpen, onMsg, onClose){
   const ws = new WebSocket(WS_URL);
   S.ws = ws;
@@ -517,16 +534,13 @@ function connectWS(onOpen, onMsg, onClose){
   ws.onerror   = e =>{ console.error('[WS] error',e); };
   return ws;
 }
-
-// Keepalive ping — prevents Railway/Render from closing idle WS connections
 function startWSPing(){
   clearInterval(S._pingTimer);
-  S._pingTimer = setInterval(()=>{
-    wsSend({ type:'ping' });
-  }, 20000);
+  S._pingTimer = setInterval(()=>{ wsSend({ type:'ping' }); }, 20000);
 }
+
 // ══════════════════════════════════════════════════════════════════
-//  SERVER — INIT (WebSocket)
+//  SERVER — INIT
 // ══════════════════════════════════════════════════════════════════
 function initServer(){
   S.myId = 'host-'+uid();
@@ -534,12 +548,10 @@ function initServer(){
   setStatus('s','Connecting to server...','b');
 
   connectWS(
-    // onOpen
     (ws)=>{
       startWSPing();
       wsSend({ type:'host-create', code:S.code, clientId:S.myId });
     },
-    // onMessage
     (msg)=>{
       console.log('[Host] msg:', msg.type, msg.clientId||'');
       if(msg.type==='host-ready'){
@@ -554,8 +566,8 @@ function initServer(){
       if(msg.type==='client-left')   onClientDrop(msg.clientId);
       if(msg.type==='result')        onClientResult(msg.from, msg);
       if(msg.type==='health')        onClientHealth(msg.from, msg.h);
+      if(msg.type==='sched-result')  onClientSchedResult(msg.from, msg.data);
     },
-    // onClose
     ()=>{
       $('sDot').className='dot r';
       setStatus('s','Server disconnected — tap ↺ to reconnect','r');
@@ -565,10 +577,14 @@ function initServer(){
 
 function onClientJoined(clientId){
   const n = Object.keys(S.clients).length+1;
-  S.clients[clientId]={ name:'Client '+n, health:{battery:100,cpu:50,throughput:50,fps:0}, frames:0, dets:0, lats:[], pend:0 };
+  S.clients[clientId]={
+    name:'Client '+n,
+    health:{battery:100,cpu:50,throughput:50,fps:0},
+    frames:0, dets:0, lats:[], pend:0,
+    schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+    schedFrames:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 }
+  };
   updateCliCount(); addClientUI(clientId);
-  // Send config to this client
-  wsSend({ type:'cfg', code:S.code, clientId:S.myId, data:{ to:clientId, sched:S.sched } });
   toast('Client '+n+' connected!');
   setStatus('s',Object.keys(S.clients).length+' client(s) connected','g');
 }
@@ -584,12 +600,15 @@ function onClientResult(clientId, msg){
   const cli=S.clients[clientId]; if(!cli) return;
   const lat=Date.now()-msg.ts;
   cli.frames++; cli.dets+=msg.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
+  // track per-scheduler latency on host side too
+  if(msg.sched && cli.schedLats[msg.sched]){
+    cli.schedLats[msg.sched].push(lat);
+    cli.schedFrames[msg.sched]=(cli.schedFrames[msg.sched]||0)+1;
+  }
   S.totalDet+=msg.dets.length; S.lats.push(lat);
   updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
   if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
   updateSrvStats();
-  const stats=buildStats();
-  wsSend({ type:'stats', code:S.code, clientId:S.myId, data:{ stats } });
 }
 
 function onClientHealth(clientId, h){
@@ -597,19 +616,150 @@ function onClientHealth(clientId, h){
   cli.health={...cli.health,...h}; updateClientUI(clientId);
 }
 
-// dispatch a frame to a chosen client via WS relay
+// Called when a client sends its per-scheduler averaged results
+function onClientSchedResult(clientId, data){
+  // data = { greedy:{avgTime,avgLat,avgEnergy,frames}, pso:{...}, ... }
+  S.clientResults[clientId] = data;
+  S.clientResultsReceived.add(clientId);
+  const totalClients = Object.keys(S.clients).length;
+  const received = S.clientResultsReceived.size;
+  $('sResSubtitle').textContent = received+'/'+totalClients+' client(s) reported';
+  renderFinalResults();
+}
+
+// ── SCHEDULERS ────────────────────────────────────────────────────
+function hScore(cli){
+  const h=cli.health||{};
+  const hasBat=(h.battery!=null&&h.battery>=0);
+  const batW=hasBat?0.20:0, batSc=hasBat?(h.battery/100)*batW:0, rest=1-batW;
+  return batSc+(1-(h.cpu||50)/100)*rest*0.28+(h.throughput||50)/100*rest*0.32+Math.min((h.fps||0)/30,1)*rest*0.22+1/(1+(cli.pend||0))*rest*0.18;
+}
+function fitFn(w,s){ const sum=w.reduce((a,b)=>a+Math.abs(b),0)||1; return w.reduce((a,v,i)=>a+(Math.abs(v)/sum)*s[i],0); }
+
+function schedGreedy(cids){ return cids.reduce((a,b)=>hScore(S.clients[a])>=hScore(S.clients[b])?a:b); }
+
+function schedPSO(cids){
+  if(cids.length===1) return cids[0];
+  const sc=cids.map(id=>hScore(S.clients[id]));
+  let parts=Array.from({length:8},()=>sc.map(()=>Math.random()));
+  let pb=parts.map(p=>[...p]),gb=[...parts[0]],gbf=fitFn(gb,sc);
+  for(let i=0;i<6;i++){
+    parts=parts.map((p,pi)=>p.map((v,j)=>0.72*v+1.49*Math.random()*(pb[pi][j]-v)+1.49*Math.random()*(gb[j]-v)));
+    parts.forEach((p,pi)=>{ const f=fitFn(p,sc); if(f>fitFn(pb[pi],sc)) pb[pi]=[...p]; if(f>gbf){gb=[...p];gbf=f;} });
+  }
+  return cids[gb.indexOf(Math.max(...gb))%cids.length];
+}
+
+function schedMOMPSO(cids){
+  if(cids.length===1) return cids[0];
+  const obj=id=>{ const c=S.clients[id]; const lat=c.lats.length?c.lats.slice(-5).reduce((a,b)=>a+b,0)/Math.min(c.lats.length,5):150; return hScore(c)*.5-(lat/500)*.3-(c.pend||0)/5*.2; };
+  return cids.reduce((a,b)=>obj(a)>=obj(b)?a:b);
+}
+
+function schedGA(cids){
+  if(cids.length===1) return cids[0];
+  const sc=cids.map(id=>{ const c=S.clients[id]; const lat=c.lats.length?c.lats.slice(-3).reduce((a,b)=>a+b,0)/Math.min(c.lats.length,3):150; return hScore(c)*.45-(lat/500)*.3-(c.pend||0)/5*.25+(Math.random()*.04); });
+  const sorted=[...sc.map((s,i)=>({s,i}))].sort((a,b)=>b.s-a.s);
+  const blended=sorted[0].s*.7+(sorted[1]?.s||0)*.3;
+  const diffs=sc.map(s=>Math.abs(s-blended));
+  return cids[diffs.indexOf(Math.min(...diffs))];
+}
+
+function pickClientForSched(sched){
+  const cids=Object.keys(S.clients);
+  if(!cids.length) return null;
+  switch(sched){
+    case 'greedy':    return schedGreedy(cids);
+    case 'pso':       return schedPSO(cids);
+    case 'mompso':    return schedMOMPSO(cids);
+    case 'mompso-ga': return schedGA(cids);
+    default: return cids[0];
+  }
+}
+
+// Dispatch one frame per scheduler — all 4 run simultaneously
 function dispatch(jpg,fw,fh){
-  const id=pickClient(); if(!id) return;
+  const cids=Object.keys(S.clients);
+  if(!cids.length) return;
   const ts=Date.now();
-  wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts } });
-  S.sent++; if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
+  SCHEDS.forEach(sched=>{
+    const id=pickClientForSched(sched);
+    if(!id) return;
+    wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
+    S.sent++;
+    if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
+    S.schedSent[sched]=(S.schedSent[sched]||0)+1;
+  });
   $('sFrSent').textContent=S.sent;
 }
 
+// ── SERVER RESULTS ────────────────────────────────────────────────
+// Build final result table: sum of per-client averages per scheduler
+// + total completion time = sum of all frames' completion times across all clients
+function renderFinalResults(){
+  const sec=$('sResSec'), tbody=$('sResTbody');
+  if(!sec||!tbody) return;
+  const clientIds=Object.keys(S.clientResults);
+  if(!clientIds.length) return;
+  sec.style.display='block';
+
+  const cols=['g','b','p','a'];
+  let rows='';
+  let totalCompletionTime=0;
+  let totalLatencySum=0, totalEnergySum=0, totalSchedCount=0;
+
+  SCHEDS.forEach((sched,i)=>{
+    let sumAvgTime=0, sumAvgLat=0, sumAvgEnergy=0, clientCount=0;
+    clientIds.forEach(cid=>{
+      const cr=S.clientResults[cid];
+      if(cr && cr[sched]){
+        sumAvgTime   += cr[sched].avgTime   || 0;
+        sumAvgLat    += cr[sched].avgLat    || 0;
+        sumAvgEnergy += cr[sched].avgEnergy || 0;
+        clientCount++;
+      }
+    });
+    if(!clientCount) return;
+    // Total completion time for this scheduler = sum of all clients' avg completion times
+    const schedTotalTime = sumAvgTime;
+    totalCompletionTime += schedTotalTime;
+    totalLatencySum     += sumAvgLat;
+    totalEnergySum      += sumAvgEnergy;
+    totalSchedCount++;
+    rows+=`<tr>
+      <td class="${cols[i]}">${SCHED_NAMES[sched]}</td>
+      <td class="bld">${sumAvgTime.toFixed(4)}s</td>
+      <td>${Math.round(sumAvgLat)}ms</td>
+      <td>${sumAvgEnergy.toFixed(6)}KJ</td>
+    </tr>`;
+  });
+
+  // Total row: sum across all schedulers
+  const totTime  = totalCompletionTime.toFixed(4);
+  const totLat   = totalSchedCount ? Math.round(totalLatencySum/totalSchedCount) : 0;
+  const totEnergy= totalEnergySum.toFixed(6);
+
+  tbody.innerHTML = rows +
+    `<tr class="tot">
+      <td>TOTAL</td>
+      <td>${totTime}s</td>
+      <td>${totLat}ms</td>
+      <td>${totEnergy}KJ</td>
+    </tr>`;
+}
+
+function updateSrvStats(){
+  $('sTotDet').textContent=S.totalDet;
+  const avg=S.lats.length?Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length):0;
+  $('sAvgLat').textContent=avg+'ms';
+}
+
 // ══════════════════════════════════════════════════════════════════
-//  CLIENT — INIT & JOIN (WebSocket)
+//  CLIENT — INIT & JOIN
 // ══════════════════════════════════════════════════════════════════
 async function initClient(){
+  // init per-scheduler tracking
+  SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
   startHealthReporting();
   await loadModel();
 }
@@ -644,14 +794,13 @@ function joinSession(){
 
   S.myId = 'cli-'+uid();
   S.code = code;
+  SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
 
   connectWS(
-    // onOpen
     ()=>{
       startWSPing();
       wsSend({ type:'client-join', code:S.code, clientId:S.myId });
     },
-    // onMessage
     (msg)=>{
       console.log('[Client] msg:', msg.type);
       if(msg.type==='joined'){
@@ -667,34 +816,49 @@ function joinSession(){
         updateHealth();
       }
       if(msg.type==='error'){
-        console.error('[Client] server error:', msg.msg);
         toast(msg.msg||'Connection error'); resetJoin();
         setStatus('c',msg.msg||'Error','r');
       }
-      if(msg.type==='frame')  handleFrame(msg);
-      if(msg.type==='stats')  renderStats(msg.stats,'cResTbody','cResSec');
-      if(msg.type==='cfg')    return; // sched config, ignore on client
-      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; }
+      if(msg.type==='frame')     handleFrame(msg);
+      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
     },
-    // onClose
     ()=>{
       $('cDot').className='dot r';
       setStatus('c','Disconnected — tap ↺ to retry','r');
       resetJoin(); $('discBtn').style.display='none';
+      sendSchedResults();
     }
   );
 }
 
 function disconnectClient(){
+  sendSchedResults();
   clearInterval(S.healthTimer);
   if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
   $('cDot').className='dot'; $('discBtn').style.display='none';
   setStatus('c','Disconnected',''); resetJoin(); toast('Disconnected');
 }
 
+// Send per-scheduler averaged results to host
+function sendSchedResults(){
+  if(!S.ws || S.ws.readyState!==WebSocket.OPEN) return;
+  const result={};
+  SCHEDS.forEach(sched=>{
+    const d=S.schedData[sched];
+    if(!d || !d.frames) return;
+    const avgLat  = d.lats.length ? Math.round(d.lats.reduce((a,b)=>a+b,0)/d.lats.length) : 0;
+    const avgEnergy = d.frames ? d.energySum/d.frames : 0;
+    // avgTime = average completion time per frame (lat in seconds)
+    const avgTime = d.lats.length ? (d.lats.reduce((a,b)=>a+b,0)/d.lats.length)/1000 : 0;
+    result[sched]={ avgTime, avgLat, avgEnergy, frames:d.frames };
+  });
+  wsSend({ type:'sched-result', code:S.code, clientId:S.myId, data:result });
+}
+
 async function handleFrame(data){
   $('cNoVid').style.display='none';
   if(!data.jpg){ console.warn('[frame] no jpg in frame'); return; }
+  const sched = data.sched || 'greedy';
   const img=new Image();
   img.onerror = ()=>{ console.error('[frame] img failed to load'); };
   img.onload=async()=>{
@@ -712,21 +876,28 @@ async function handleFrame(data){
       ctx.fillStyle='rgba(77,143,255,.88)'; ctx.fillRect(x,y-18,ctx.measureText(lbl).width+8,18);
       ctx.fillStyle='#fff'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x+4,y-5);
     });
+
+    // Track overall stats
     S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
     const frameEnergy=(POWER_W*(lat/1000))/1000;
     S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
+
+    // Track per-scheduler stats
+    if(!S.schedData[sched]) S.schedData[sched]={ lats:[], energySum:0, frames:0 };
+    S.schedData[sched].lats.push(lat);
+    S.schedData[sched].energySum+=frameEnergy;
+    S.schedData[sched].frames++;
+
     const avgEnergy=S.cliEnergySum/S.frDone;
     const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
     $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
-    wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
+
+    // Send result back to host (includes which scheduler sent this frame)
+    wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, sched, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
   };
   img.src=data.jpg;
-}
-
-async function handleSrvMsg(data){
-  // legacy stub — not used with WS
 }
 
 function renderCliDets(dets){
@@ -735,25 +906,12 @@ function renderCliDets(dets){
 }
 
 // ══════════════════════════════════════════════════════════════════
-//  HEALTH  — cross-browser accurate metrics
-//  Battery:    Battery API (Android Chrome) → falls back to N/A
-//  CPU load:   rAF frame-timing jank detector (works everywhere)
-//  Memory:     performance.memory (Chrome) → GC pressure heuristic
-//  Throughput: measured from round-trip latency (real data)
-//  FPS:        detection frames per second (real data)
-//  Network:    navigator.connection (Android Chrome) → latency-based
+//  HEALTH
 // ══════════════════════════════════════════════════════════════════
 const HD = {
-  battery: -1,       // -1 = unsupported/unknown
-  cpu: 50,           // 0=idle 100=maxed
-  memory: 50,        // 0=free 100=full
-  throughput: 50,    // 0=slow 100=fast
-  fps: 0,
-  network: -1,       // Mbps, -1=unknown
-  batterySupported: false,
+  battery: -1, cpu: 50, memory: 50, throughput: 50, fps: 0, network: -1, batterySupported: false,
 };
 
-// ── Battery: try API, mark unsupported clearly ──────────────────
 async function initBattery(){
   if(!navigator.getBattery){ HD.batterySupported=false; return; }
   try{
@@ -766,13 +924,11 @@ async function initBattery(){
   }catch(e){ HD.batterySupported=false; }
 }
 
-// ── CPU: rAF jank — compare expected vs actual frame gap ────────
 let _cpuFrames=[], _cpuLast=0;
 function measureCPU(){
   const now=performance.now();
   if(_cpuLast){
     const gap=now-_cpuLast;
-    // ideal = 16.7ms (60fps). >50ms = very busy, >100ms = maxed
     const load=Math.min(100,Math.max(0,Math.round((gap-16)/84*100)));
     _cpuFrames.push(load);
     if(_cpuFrames.length>10) _cpuFrames.shift();
@@ -782,42 +938,25 @@ function measureCPU(){
   requestAnimationFrame(measureCPU);
 }
 
-// ── Memory ──────────────────────────────────────────────────────
 function measureMemory(){
   if(performance.memory){
     HD.memory=Math.round((performance.memory.usedJSHeapSize/performance.memory.jsHeapSizeLimit)*100);
     return;
   }
-  // Fallback: estimate from object count heuristic (stable ~40-60%)
   HD.memory=50;
 }
 
-// ── Network speed via navigator.connection ──────────────────────
 function measureNetwork(){
   const nc=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
   if(nc){
-    // downlink in Mbps (Chrome Android)
-    if(nc.downlink && nc.downlink>0){
-      HD.network=nc.downlink;
-      // map to 0-100 throughput score: 0Mbps=0, 10Mbps+=100
-      HD.throughput=Math.min(100,Math.round(nc.downlink/10*100));
-      return;
-    }
-    // effectiveType fallback: 4g/3g/2g/slow-2g
+    if(nc.downlink && nc.downlink>0){ HD.network=nc.downlink; HD.throughput=Math.min(100,Math.round(nc.downlink/10*100)); return; }
     const map={'4g':85,'3g':50,'2g':25,'slow-2g':10};
-    if(nc.effectiveType){
-      HD.throughput=map[nc.effectiveType]||50;
-      return;
-    }
+    if(nc.effectiveType){ HD.throughput=map[nc.effectiveType]||50; return; }
   }
-  // Final fallback: derive from round-trip latency
-  const al=S.cliLats.length
-    ? S.cliLats.slice(-5).reduce((a,b)=>a+b,0)/Math.min(S.cliLats.length,5)
-    : 100;
+  const al=S.cliLats.length?S.cliLats.slice(-5).reduce((a,b)=>a+b,0)/Math.min(S.cliLats.length,5):100;
   HD.throughput=Math.round(Math.max(5,Math.min(100,100-al/10)));
 }
 
-// ── FPS: real detection rate ────────────────────────────────────
 function measureFPS(){
   if(S.frDone>0 && S.cliStart>0){
     const elapsed=(Date.now()-S.cliStart)/1000;
@@ -825,133 +964,50 @@ function measureFPS(){
   }
 }
 
-async function updateHealth(){
-  measureCPU_sync();
-  measureMemory();
-  measureNetwork();
-  measureFPS();
-  renderHealth();
-  // Send health to host via WebSocket
-  wsSend({ type:'health', code:S.code, clientId:S.myId, data:{ h:{...HD} } });
-}
-
-// Sync CPU sample (not rAF-based, called on interval too)
 function measureCPU_sync(){
   const t0=performance.now();
-  // lightweight busy loop — ~1ms on fast device, ~10ms on slow
   let x=0; for(let i=0;i<8000;i++) x+=Math.sqrt(i);
   const dt=performance.now()-t0;
-  // 0.3ms=idle(0%), 10ms=busy(100%)
   const load=Math.min(100,Math.round(dt/0.1));
   _cpuFrames.push(load);
   if(_cpuFrames.length>8) _cpuFrames.shift();
   HD.cpu=Math.round(_cpuFrames.reduce((a,b)=>a+b,0)/_cpuFrames.length);
 }
 
+async function updateHealth(){
+  measureCPU_sync(); measureMemory(); measureNetwork(); measureFPS();
+  renderHealth();
+  wsSend({ type:'health', code:S.code, clientId:S.myId, data:{ h:{...HD} } });
+}
+
 function startHealthReporting(){
   initBattery();
-  requestAnimationFrame(measureCPU);  // start rAF loop
+  requestAnimationFrame(measureCPU);
   updateHealth();
   S.healthTimer=setInterval(updateHealth,3000);
 }
 
 function renderHealth(){
-  // Build display rows — battery shows "N/A" if unsupported
   const batVal  = HD.batterySupported ? HD.battery : null;
   const batDisp = batVal!==null ? batVal+'%' : 'N/A';
   const batBar  = batVal!==null ? batVal : 0;
-
   const netDisp = HD.network>=0 ? HD.network.toFixed(1)+' Mbps' : HD.throughput+'%';
-
   const rows=[
-    { lbl:'Battery',    val:batBar,          disp:batDisp,                    c:'var(--acc)',  na:batVal===null },
-    { lbl:'CPU free',   val:100-HD.cpu,      disp:(100-HD.cpu)+'%',           c:'var(--blue)' },
-    { lbl:'Network',    val:HD.throughput,   disp:netDisp,                    c:'var(--pur)'  },
-    { lbl:'FPS',        val:Math.min(100,HD.fps*3.33), disp:HD.fps.toFixed(1)+' fps', c:'var(--amb)'  },
-    { lbl:'Mem free',   val:100-HD.memory,   disp:(100-HD.memory)+'%',        c:'var(--red)'  },
+    { lbl:'Battery',  val:batBar,          disp:batDisp,                    c:'var(--acc)',  na:batVal===null },
+    { lbl:'CPU free', val:100-HD.cpu,      disp:(100-HD.cpu)+'%',           c:'var(--blue)' },
+    { lbl:'Network',  val:HD.throughput,   disp:netDisp,                    c:'var(--pur)'  },
+    { lbl:'FPS',      val:Math.min(100,HD.fps*3.33), disp:HD.fps.toFixed(1)+' fps', c:'var(--amb)' },
+    { lbl:'Mem free', val:100-HD.memory,   disp:(100-HD.memory)+'%',        c:'var(--red)'  },
   ];
-
-  // Score: skip battery from score if unsupported, redistribute weight
-  const batW  = batVal!==null ? 0.20 : 0;
-  const rest  = 1 - batW;
-  const batSc = batVal!==null ? (batVal/100)*batW : 0;
-  const sc = batSc
-    + (1-HD.cpu/100)  * rest*0.28
-    + (HD.throughput/100) * rest*0.32
-    + (Math.min(HD.fps,30)/30) * rest*0.22
-    + (1-HD.memory/100) * rest*0.18;
-
+  const batW=batVal!==null?0.20:0, rest=1-batW, batSc=batVal!==null?(batVal/100)*batW:0;
+  const sc=batSc+(1-HD.cpu/100)*rest*0.28+(HD.throughput/100)*rest*0.32+(Math.min(HD.fps,30)/30)*rest*0.22+(1-HD.memory/100)*rest*0.18;
   $('healthScore').textContent='Score: '+Math.round(sc*100);
-
   $('healthBars').innerHTML=rows.map(r=>`
     <div class="hbrow">
       <div class="hbl" style="width:60px;font-size:9px">${r.lbl}</div>
-      <div class="hbt">
-        ${r.na
-          ? `<div class="hb" style="width:0%;background:var(--txt3)"></div>`
-          : `<div class="hb" style="width:${Math.min(100,Math.max(0,r.val))}%;background:${r.c}"></div>`
-        }
-      </div>
-      <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);width:42px;text-align:right;margin-left:4px">
-        ${r.na ? '<span style="color:var(--txt3)">N/A</span>' : r.disp}
-      </div>
+      <div class="hbt">${r.na?`<div class="hb" style="width:0%;background:var(--txt3)"></div>`:`<div class="hb" style="width:${Math.min(100,Math.max(0,r.val))}%;background:${r.c}"></div>`}</div>
+      <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);width:42px;text-align:right;margin-left:4px">${r.na?'<span style="color:var(--txt3)">N/A</span>':r.disp}</div>
     </div>`).join('');
-}
-
-// ══════════════════════════════════════════════════════════════════
-//  SCHEDULERS
-// ══════════════════════════════════════════════════════════════════
-function hScore(cli){
-  const h=cli.health||{};
-  // battery=-1 means unsupported device — skip it, redistribute weight
-  const hasBat=(h.battery!=null&&h.battery>=0);
-  const batW=hasBat?0.20:0, batSc=hasBat?(h.battery/100)*batW:0, rest=1-batW;
-  return batSc+(1-(h.cpu||50)/100)*rest*0.28+(h.throughput||50)/100*rest*0.32+Math.min((h.fps||0)/30,1)*rest*0.22+1/(1+(cli.pend||0))*rest*0.18;
-}
-function fitFn(w,s){ const sum=w.reduce((a,b)=>a+Math.abs(b),0)||1; return w.reduce((a,v,i)=>a+(Math.abs(v)/sum)*s[i],0); }
-function schedGreedy(cids){ return cids.reduce((a,b)=>hScore(S.clients[a])>=hScore(S.clients[b])?a:b); }
-function schedPSO(cids){
-  if(cids.length===1) return cids[0];
-  const sc=cids.map(id=>hScore(S.clients[id]));
-  let parts=Array.from({length:8},()=>sc.map(()=>Math.random()));
-  let pb=parts.map(p=>[...p]),gb=[...parts[0]],gbf=fitFn(gb,sc);
-  for(let i=0;i<6;i++){
-    parts=parts.map((p,pi)=>p.map((v,j)=>0.72*v+1.49*Math.random()*(pb[pi][j]-v)+1.49*Math.random()*(gb[j]-v)));
-    parts.forEach((p,pi)=>{ const f=fitFn(p,sc); if(f>fitFn(pb[pi],sc)) pb[pi]=[...p]; if(f>gbf){gb=[...p];gbf=f;} });
-  }
-  return cids[gb.indexOf(Math.max(...gb))%cids.length];
-}
-function schedMOMPSO(cids){
-  if(cids.length===1) return cids[0];
-  const obj=id=>{ const c=S.clients[id]; const lat=c.lats.length?c.lats.slice(-5).reduce((a,b)=>a+b,0)/Math.min(c.lats.length,5):150; return hScore(c)*.5-(lat/500)*.3-(c.pend||0)/5*.2; };
-  return cids.reduce((a,b)=>obj(a)>=obj(b)?a:b);
-}
-function schedGA(cids){
-  if(cids.length===1) return cids[0];
-  const sc=cids.map(id=>{ const c=S.clients[id]; const lat=c.lats.length?c.lats.slice(-3).reduce((a,b)=>a+b,0)/Math.min(c.lats.length,3):150; return hScore(c)*.45-(lat/500)*.3-(c.pend||0)/5*.25+(Math.random()*.04); });
-  const sorted=[...sc.map((s,i)=>({s,i}))].sort((a,b)=>b.s-a.s);
-  const blended=sorted[0].s*.7+(sorted[1]?.s||0)*.3;
-  const diffs=sc.map(s=>Math.abs(s-blended));
-  return cids[diffs.indexOf(Math.min(...diffs))];
-}
-function pickClient(){
-  const cids=Object.keys(S.clients);
-  if(!cids.length) return null;
-  switch(S.sched){
-    case 'greedy': return schedGreedy(cids);
-    case 'pso':    return schedPSO(cids);
-    case 'mompso': return schedMOMPSO(cids);
-    case 'mompso-ga': return schedGA(cids);
-    default: return cids[0];
-  }
-}
-// dispatch is defined in initServer block above — this stub prevents duplicate
-function dispatch(jpg,fw,fh){
-  const id=pickClient(); if(!id) return;
-  const ts=Date.now();
-  wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts } });
-  S.sent++; if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
-  $('sFrSent').textContent=S.sent;
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -984,11 +1040,9 @@ function startCapture(){
   S.capTimer=setInterval(()=>{
     if(!Object.keys(S.clients).length) return;
     const v=$('srvVid'); if(!v.videoWidth) return;
-    // Use 480p max for relay — keeps frames under ~80KB base64
     tmp.width=Math.min(S.res.w,854); tmp.height=Math.min(S.res.h,480);
     tmp.getContext('2d').drawImage(v,0,0,tmp.width,tmp.height);
     const jpg=tmp.toDataURL('image/jpeg',.5);
-    console.log('[Host] dispatching frame, size:', Math.round(jpg.length/1024)+'KB, clients:', Object.keys(S.clients).length);
     dispatch(jpg,tmp.width,tmp.height);
   },CAPTURE_MS);
 }
@@ -1019,30 +1073,24 @@ function extractFrames(vid,num,onP){
     const dur=vid.duration;
     if(!dur||isNaN(dur)){ reject(new Error('Invalid video duration')); return; }
     const frames=[],tmp=document.createElement('canvas');
-    const times=Array.from({length:num},(_,j)=>(j/(num))*dur*0.999);
+    const times=Array.from({length:num},(_,j)=>(j/num)*dur*0.999);
     let i=0;
     function next(){
       if(i>=times.length){ resolve(frames); return; }
-      const t=times[i];
-      let done=false;
+      const t=times[i]; let done=false;
       const onSeeked=()=>{
         if(done) return; done=true;
-        vid.removeEventListener('seeked',onSeeked);
-        clearTimeout(seekTimeout);
+        vid.removeEventListener('seeked',onSeeked); clearTimeout(seekTimeout);
         tmp.width=854; tmp.height=480;
         tmp.getContext('2d').drawImage(vid,0,0,854,480);
         frames.push({jpg:tmp.toDataURL('image/jpeg',.65),w:854,h:480});
-        onP&&onP((i+1)/times.length*100);
-        i++; setTimeout(next,0);
+        onP&&onP((i+1)/times.length*100); i++; setTimeout(next,0);
       };
-      // timeout fallback in case seeked never fires (some browsers/codecs)
       const seekTimeout=setTimeout(()=>{ if(!done){ done=true; vid.removeEventListener('seeked',onSeeked); i++; setTimeout(next,0); } },3000);
       vid.addEventListener('seeked',onSeeked);
       vid.currentTime=t;
     }
-    // ensure video is loaded enough
-    if(vid.readyState>=2){ next(); }
-    else{ vid.onloadeddata=()=>next(); }
+    if(vid.readyState>=2){ next(); } else{ vid.onloadeddata=()=>next(); }
   });
 }
 async function startRec(){
@@ -1083,14 +1131,6 @@ function stopLiveRec(){ if(S.mr) S.mr.stop(); S.recording=false; $('recTogBtn').
 // ══════════════════════════════════════════════════════════════════
 //  SERVER UI
 // ══════════════════════════════════════════════════════════════════
-function setSched(s,el){
-  S.sched=s;
-  document.querySelectorAll('.schip').forEach(c=>c.classList.remove('on'));
-  el.classList.add('on');
-  // Broadcast new scheduler to all clients
-  Object.keys(S.clients).forEach(id=>wsSend({ type:'cfg', code:S.code, clientId:S.myId, data:{ to:id, sched:s } }));
-  toast('Scheduler: '+el.querySelector('.sn').textContent);
-}
 function copyCode(){ navigator.clipboard?.writeText(S.code).then(()=>toast('Code copied!')).catch(()=>toast('Code: '+S.code)); }
 function updateCliCount(){ const n=Object.keys(S.clients).length; $('sCliCnt').textContent=n; $('sCliSec').style.display=n?'block':'none'; }
 function addClientUI(id){
@@ -1100,46 +1140,11 @@ function addClientUI(id){
 }
 function updateClientUI(id){
   const cli=S.clients[id]; if(!cli) return; const s=sid(id);
-  // Running average latency across all frames for this client
   const al=cli.lats.length?Math.round(cli.lats.reduce((a,b)=>a+b,0)/cli.lats.length):0;
   const m=$('clim-'+s); if(m) m.textContent=`${cli.frames}fr · ${cli.dets}obj · ${al}ms`;
   const hb=$('hbat-'+s); if(hb) hb.style.width=Math.min(100,cli.health.battery||50)+'%';
   const hc=$('hcpu-'+s); if(hc) hc.style.width=Math.min(100,100-(cli.health.cpu||50))+'%';
   const sc=$('clsc-'+s); if(sc) sc.textContent=(hScore(cli)*100).toFixed(0)+'pts';
-}
-function updateSrvStats(){
-  $('sTotDet').textContent=S.totalDet;
-  // Running average latency across ALL frames received (not just last 20)
-  const avg=S.lats.length?Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length):0;
-  $('sAvgLat').textContent=avg+'ms';
-  renderStats(buildStats(),'sResTbody','sResSec');
-}
-function buildStats(){
-  const el=S.sessStart?(Date.now()-S.sessStart)/1000:0;
-  const nc=Math.max(Object.keys(S.clients).length,1);
-  const framesProcessed=Math.max(S.lats.length,1);
-  // Average latency per frame (running average)
-  const avgLat=S.lats.length?Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length):0;
-  // Average time per frame across schedulers (relative efficiency)
-  const avgTime=el/framesProcessed;
-  // Average energy per frame: power * time_per_frame * clients / 1000
-  const avgEnergy=(POWER_W*nc*avgTime)/1000;
-  const v=[1.0,.92,.88,.85];
-  return ['greedy','pso','mompso','mompso-ga'].map((s,i)=>({
-    name:s,
-    time:+(avgTime*v[i]).toFixed(4),
-    lat:Math.round(avgLat*v[i]),
-    energy:+(avgEnergy*v[i]).toFixed(6)
-  }));
-}
-function renderStats(stats,tbodyId,secId){
-  const sec=$(secId),tbody=$(tbodyId); if(!stats?.length||!sec||!tbody) return; sec.style.display='block';
-  const cols=['g','b','p','a'],nms={greedy:'Greedy',pso:'PSO',mompso:'MOMPSO','mompso-ga':'MOMPSO-GA'};
-  const avgLat=Math.round(stats.reduce((a,b)=>a+b.lat,0)/stats.length);
-  const avgTime=(stats.reduce((a,b)=>a+ +b.time,0)/stats.length).toFixed(4);
-  const avgEnergy=(stats.reduce((a,b)=>a+ +b.energy,0)/stats.length).toFixed(6);
-  tbody.innerHTML=stats.map((s,i)=>`<tr><td class="${cols[i]}">${nms[s.name]}</td><td class="bld">${s.time}s</td><td>${s.lat}ms</td><td>${s.energy}KJ</td></tr>`).join('')
-    +`<tr class="tot"><td>AVG</td><td>${avgTime}s</td><td>${avgLat}ms</td><td>${avgEnergy}KJ</td></tr>`;
 }
 function renderSrvDets(dets){
   if(!dets.length) return; $('sDetSec').style.display='block'; const list=$('sDetList');
