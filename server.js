@@ -92,12 +92,12 @@ wss.on('connection', (ws) => {
     if (type === 'frame') {
       const sessionCode = ws._code || code;
       const session = sessions.get(sessionCode);
-      if (!session) { console.log('[frame] no session for code:', sessionCode, 'ws._code:', ws._code); return; }
+      if (!session) { console.log('[frame] no session for code:', sessionCode); return; }
       if (ws._role !== 'host') { console.log('[frame] sender is not host, role:', ws._role); return; }
       const d = data || {};
       const targetWs = session.clients.get(d.to);
-      if (!targetWs) { console.log('[frame] target client not found:', d.to, 'clients:', [...session.clients.keys()]); return; }
-      send(targetWs, { type: 'frame', ts: d.ts, jpg: d.jpg, fw: d.fw, fh: d.fh });
+      if (!targetWs) { console.log('[frame] target client not found:', d.to); return; }
+      send(targetWs, { type: 'frame', ts: d.ts, jpg: d.jpg, fw: d.fw, fh: d.fh, sched: d.sched });
       return;
     }
 

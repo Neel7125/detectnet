@@ -688,6 +688,7 @@ function pickClientForSched(sched){
 }
 
 // Dispatch one frame per scheduler — all 4 run simultaneously
+// S.sent counts VIDEO FRAMES dispatched (not WS messages)
 function dispatch(jpg,fw,fh){
   const cids=Object.keys(S.clients);
   if(!cids.length) return;
@@ -696,10 +697,10 @@ function dispatch(jpg,fw,fh){
     const id=pickClientForSched(sched);
     if(!id) return;
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
-    S.sent++;
     if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
   });
+  S.sent++; // 1 per video frame, not per scheduler
   $('sFrSent').textContent=S.sent;
 }
 
@@ -708,72 +709,66 @@ function renderFinalResults(){
   const sec=$('sResSec'), tbody=$('sResTbody');
   if(!sec||!tbody) return;
 
-  // Prefer actual client-reported results; fall back to live host-side data
+  // Always prefer client-reported (sched-result); live host data as fallback
   const reportedIds=Object.keys(S.clientResults).filter(k=>k!=='__live__');
-  const useReported=reportedIds.length>0;
-  const sourceIds=useReported ? reportedIds : (S.clientResults['__live__'] ? ['__live__'] : []);
-  if(!sourceIds.length) return;
+  const live=S.clientResults['__live__'];
+  const hasReported=reportedIds.length>0;
+  const hasLive=live && Object.keys(live).length>0;
+  if(!hasReported && !hasLive) return;
 
   sec.style.display='block';
-  if(useReported){
-    const total=Object.keys(S.clients).length;
-    $('sResSubtitle').textContent=reportedIds.length+'/'+total+' client(s) reported (final)';
-  } else {
-    $('sResSubtitle').textContent='Live — updating as frames arrive';
-  }
+  $('sResSubtitle').textContent = hasReported
+    ? reportedIds.length+'/'+Object.keys(S.clients).length+' client(s) reported'
+    : 'Live · updating as frames arrive';
 
   const cols=['g','b','p','a'];
   let rows='';
-  let totalCompletionTime=0, totalLatencySum=0, totalEnergySum=0, totalSchedCount=0;
+  let totTime=0, totLat=0, totEnergy=0, schedCount=0;
 
   SCHEDS.forEach((sched,i)=>{
-    let sumAvgTime=0, sumAvgLat=0, sumAvgEnergy=0, clientCount=0;
+    let avgTime=0, avgLat=0, avgEnergy=0, found=false;
 
-    if(useReported){
+    if(hasReported){
+      // Sum averages across all reporting clients
+      let sumTime=0, sumLat=0, sumEnergy=0, cnt=0;
       reportedIds.forEach(cid=>{
         const cr=S.clientResults[cid];
-        if(cr && cr[sched]){
-          sumAvgTime   += cr[sched].avgTime   || 0;
-          sumAvgLat    += cr[sched].avgLat    || 0;
-          sumAvgEnergy += cr[sched].avgEnergy || 0;
-          clientCount++;
+        if(cr && cr[sched] && cr[sched].frames>0){
+          sumTime   += cr[sched].avgTime   || 0;
+          sumLat    += cr[sched].avgLat    || 0;
+          sumEnergy += cr[sched].avgEnergy || 0;
+          cnt++;
         }
       });
-    } else {
-      const live=S.clientResults['__live__'];
-      if(live && live[sched]){
-        sumAvgTime   = live[sched].avgTime   || 0;
-        sumAvgLat    = live[sched].avgLat    || 0;
-        sumAvgEnergy = live[sched].avgEnergy || 0;
-        clientCount  = 1;
-      }
+      if(cnt>0){ avgTime=sumTime; avgLat=sumLat; avgEnergy=sumEnergy; found=true; }
     }
 
-    if(!clientCount) return;
-    totalCompletionTime += sumAvgTime;
-    totalLatencySum     += sumAvgLat;
-    totalEnergySum      += sumAvgEnergy;
-    totalSchedCount++;
+    if(!found && hasLive && live[sched] && live[sched].frames>0){
+      avgTime   = live[sched].avgTime   || 0;
+      avgLat    = live[sched].avgLat    || 0;
+      avgEnergy = live[sched].avgEnergy || 0;
+      found=true;
+    }
+
+    if(!found) return;
+    totTime   += avgTime;
+    totLat    += avgLat;
+    totEnergy += avgEnergy;
+    schedCount++;
     rows+=`<tr>
       <td class="${cols[i]}">${SCHED_NAMES[sched]}</td>
-      <td class="bld">${sumAvgTime.toFixed(4)}s</td>
-      <td>${Math.round(sumAvgLat)}ms</td>
-      <td>${sumAvgEnergy.toFixed(6)}KJ</td>
+      <td class="bld">${avgTime.toFixed(4)}s</td>
+      <td>${Math.round(avgLat)}ms</td>
+      <td>${avgEnergy.toFixed(6)}KJ</td>
     </tr>`;
   });
 
-  if(!rows) return;
-  const totTime  = totalCompletionTime.toFixed(4);
-  const totLat   = totalSchedCount ? Math.round(totalLatencySum/totalSchedCount) : 0;
-  const totEnergy= totalEnergySum.toFixed(6);
-
-  tbody.innerHTML = rows +
-    `<tr class="tot">
-      <td>TOTAL</td>
-      <td>${totTime}s</td>
-      <td>${totLat}ms</td>
-      <td>${totEnergy}KJ</td>
-    </tr>`;
+  tbody.innerHTML = rows + (schedCount>0 ? `<tr class="tot">
+    <td>TOTAL</td>
+    <td>${totTime.toFixed(4)}s</td>
+    <td>${schedCount?Math.round(totLat/schedCount):0}ms</td>
+    <td>${totEnergy.toFixed(6)}KJ</td>
+  </tr>` : '');
 }
 
 function updateSrvStats(){
