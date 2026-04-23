@@ -764,6 +764,7 @@ function renderFinalResults(){
 
   tbody.innerHTML = html;
   if(sub) sub.textContent = cids.length+' client(s) · live';
+  showClientFrameSummary();
 
   // per-client frame breakdown
   const cliFramesEl = document.getElementById('sCliFrames');
@@ -1253,7 +1254,8 @@ async function sendUploadFrames(){
   $('upProgLbl').textContent = '✓ All '+frames.length+' frames sent!';
   $('sendFrBtn').disabled = false;
   toast('Done! '+frames.length+' frames sent');
-  showClientFrameSummary();
+  // wait for results to come back before showing frame counts
+  setTimeout(showClientFrameSummary, 3000);
 }
 
 // ── Frame extraction ─────────────────────────────────────────────
@@ -1375,7 +1377,7 @@ async function sendRecFrames(){
   for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); await sleep(45); }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--acc)">✓ Sent '+frames.length+' frames!</div>';
   toast('Done!');
-  showClientFrameSummary();
+  setTimeout(showClientFrameSummary, 3000);
 }
 let lrc=[];
 function toggleRec(){ if(!S.recording){ startLiveRec(); }else{ stopLiveRec(); } }
@@ -1399,13 +1401,13 @@ function showClientFrameSummary(){
   const list = document.getElementById('sFrameDistList');
   if(!sec || !list) return;
   const cids = Object.keys(S.clients);
-  if(!cids.length) return;
+  if(!cids.length){ sec.style.display='none'; return; }
   list.innerHTML = cids.map(function(id){
     const cli = S.clients[id];
     const frames = Math.floor(cli.frames / 4);
-    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--bord)">'
-      + '<span style="font-size:12px;font-weight:700">'+cli.name+'</span>'
-      + '<span style="font-size:13px;font-family:var(--mono);color:var(--acc)">'+frames+' frames</span>'
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--bord)">'
+      + '<span style="font-size:13px;font-weight:700;color:var(--txt)">'+cli.name+'</span>'
+      + '<span style="font-size:14px;font-family:var(--mono);color:var(--acc);font-weight:700">'+frames+' frames</span>'
       + '</div>';
   }).join('');
   sec.style.display = 'block';
