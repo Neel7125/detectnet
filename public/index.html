@@ -343,6 +343,12 @@ t e s t 
       <div id="sCliList"></div>
     </div>
 
+    <!-- Frame Distribution — shown after sending completes -->
+    <div class="card" id="sFrameDistSec" style="display:none">
+      <div class="lbl">Frames Per Client</div>
+      <div id="sFrameDistList"></div>
+    </div>
+
     <div id="sDetSec" style="display:none">
       <div class="sechd"><span class="sect">Cluster Detections</span><span class="seca" onclick="clearDets()">Clear</span></div>
       <div class="detscr" id="sDetList"></div>
@@ -1389,13 +1395,20 @@ function copyCode(){ navigator.clipboard?.writeText(S.code).then(()=>toast('Code
 function updateCliCount(){ const n=Object.keys(S.clients).length; $('sCliCnt').textContent=n; $('sCliSec').style.display=n?'block':'none'; }
 
 function showClientFrameSummary(){
-  const total = S.sent || 0;
-  Object.keys(S.clients).forEach(function(id){
+  const sec = document.getElementById('sFrameDistSec');
+  const list = document.getElementById('sFrameDistList');
+  if(!sec || !list) return;
+  const cids = Object.keys(S.clients);
+  if(!cids.length) return;
+  list.innerHTML = cids.map(function(id){
     const cli = S.clients[id];
-    const s = sid(id);
-    const el = document.getElementById('cliframes-'+s);
-    if(el) el.textContent = 'Frames assigned: ' + cli.dispatchedFrames + ' / ' + total;
-  });
+    const frames = Math.floor(cli.frames / 4);
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:6px 0;border-bottom:1px solid var(--bord)">'
+      + '<span style="font-size:12px;font-weight:700">'+cli.name+'</span>'
+      + '<span style="font-size:13px;font-family:var(--mono);color:var(--acc)">'+frames+' frames</span>'
+      + '</div>';
+  }).join('');
+  sec.style.display = 'block';
 }
 function addClientUI(id){
   const cli=S.clients[id],s=sid(id),el=document.createElement('div'); el.className='cliitem'; el.id='cli-'+s;
