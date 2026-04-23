@@ -661,7 +661,9 @@ function onClientJoined(clientId){
   S.clients[clientId]={
     name:'Client '+n,
     health:{battery:100,cpu:50,throughput:50,fps:0},
-    frames:0, dets:0, lats:[], pend:0
+    frames:0, dets:0, lats:[], pend:0,
+    // per-scheduler latency accumulator on host
+    schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] }
   };
   updateCliCount(); addClientUI(clientId);
   toast('Client '+n+' connected!');
@@ -677,12 +679,16 @@ function onClientDrop(clientId){
 
 function onClientResult(clientId, msg){
   const cli=S.clients[clientId]; if(!cli) return;
-  const lat=Date.now()-msg.ts;
+  const lat = Date.now() - msg.ts;
   cli.frames++; cli.dets+=msg.dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
+  // accumulate per-scheduler latency on host
+  const sched = msg.sched || 'greedy';
+  if(cli.schedLats[sched]) cli.schedLats[sched].push(lat);
   S.totalDet+=msg.dets.length; S.lats.push(lat);
   updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
   if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
   updateSrvStats();
+  renderFinalResults();
 }
 
 function onClientHealth(clientId, h){
@@ -690,14 +696,66 @@ function onClientHealth(clientId, h){
   cli.health={...cli.health,...h}; updateClientUI(clientId);
 }
 
-// Called when a client sends its per-scheduler averages
-function onClientSchedResult(clientId, data){
-  RES.hostReceive(clientId, data);
-  RES.hostRender();
-}
+// sched-result from client — ignored, host calculates everything itself
+function onClientSchedResult(clientId, data){ /* no-op */ }
 
 function renderFinalResults(){
-  RES.hostRender();
+  const sec = document.getElementById('sResSec');
+  const tbody = document.getElementById('sResTbody');
+  const sub = document.getElementById('sResSubtitle');
+  if(!sec || !tbody) return;
+
+  const cids = Object.keys(S.clients);
+  if(!cids.length) return;
+
+  // check we have at least some data
+  let anyData = false;
+  cids.forEach(function(cid){
+    SCHEDS.forEach(function(s){
+      if(S.clients[cid].schedLats[s] && S.clients[cid].schedLats[s].length) anyData = true;
+    });
+  });
+  if(!anyData) return;
+
+  const COLORS = { greedy:'g', pso:'b', mompso:'p', 'mompso-ga':'a' };
+  let html = '', totTime=0, totLat=0, totEnergy=0, schedCount=0;
+
+  SCHEDS.forEach(function(sched){
+    // sum of per-client averages for this scheduler
+    let sumLat=0, found=false;
+    cids.forEach(function(cid){
+      const lats = S.clients[cid].schedLats[sched];
+      if(!lats || !lats.length) return;
+      let s=0; for(let i=0;i<lats.length;i++) s+=lats[i];
+      sumLat += s/lats.length;
+      found = true;
+    });
+    if(!found) return;
+    const avgTime   = sumLat/1000;
+    const avgEnergy = (POWER_W * avgTime) / 1000;
+    totTime   += avgTime;
+    totLat    += sumLat;
+    totEnergy += avgEnergy;
+    schedCount++;
+    html += '<tr>'
+      +'<td class="'+COLORS[sched]+'">'+SCHED_NAMES[sched]+'</td>'
+      +'<td class="bld">'+avgTime.toFixed(4)+'s</td>'
+      +'<td>'+sumLat.toFixed(1)+'ms</td>'
+      +'<td>'+avgEnergy.toFixed(6)+'KJ</td>'
+      +'</tr>';
+  });
+
+  if(!schedCount) return;
+
+  html += '<tr class="tot"><td>TOTAL</td>'
+    +'<td>'+totTime.toFixed(4)+'s</td>'
+    +'<td>'+totLat.toFixed(1)+'ms</td>'
+    +'<td>'+totEnergy.toFixed(6)+'KJ</td>'
+    +'</tr>';
+
+  tbody.innerHTML = html;
+  if(sub) sub.textContent = cids.length+' client(s) · live';
+  sec.style.display = 'block';
 }
 function hScore(cli){
   const h=cli.health||{};
