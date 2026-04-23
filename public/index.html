@@ -999,7 +999,7 @@ async function handleFrame(data){
     // Update client UI
     const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
     const avgEnergy=S.cliEnergySum/S.frDone;
-    $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
+    $('cFrDone').textContent=Math.floor(S.frDone/4); $('cObjFnd').textContent=S.objFound;
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
 
