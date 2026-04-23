@@ -598,8 +598,6 @@ function onClientResult(clientId, msg){
   if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
   updateSrvStats();
   buildLiveResults();
-  // Also show results section immediately on first result
-  if($('sResSec').style.display==='none') $('sResSec').style.display='block';
 }
 
 function onClientHealth(clientId, h){
@@ -617,11 +615,10 @@ function onClientSchedResult(clientId, data){
 }
 
 // Build results live from per-scheduler latency data the host already tracks.
-// Each client's average latency for a scheduler is summed (not averaged) across
-// clients, because each client processed a different slice of the video.
 function buildLiveResults(){
   const cids=Object.keys(S.clients);
   if(!cids.length) return;
+  let anyData=false;
   const result={};
   SCHEDS.forEach(sched=>{
     let sumAvgLat=0, sumAvgTime=0, sumAvgEnergy=0, clientsWithData=0;
@@ -638,15 +635,15 @@ function buildLiveResults(){
         clientsWithData++;
       }
     });
-    if(!clientsWithData){ result[sched]={ avgTime:0, avgLat:0, avgEnergy:0, frames:0, clients:0 }; return; }
+    if(clientsWithData>0) anyData=true;
     result[sched]={
-      avgTime:   sumAvgTime,    // sum of per-client averages
-      avgLat:    sumAvgLat,     // sum of per-client averages
-      avgEnergy: sumAvgEnergy,  // sum of per-client averages
-      frames:    clientsWithData,
-      clients:   clientsWithData
+      avgTime:   sumAvgTime,
+      avgLat:    sumAvgLat,
+      avgEnergy: sumAvgEnergy,
+      frames:    clientsWithData   // >0 means real data exists
     };
   });
+  if(!anyData) return; // nothing to show yet
   S.clientResults['__live__']=result;
   renderFinalResults();
 }
@@ -728,17 +725,11 @@ function renderFinalResults(){
   const sec=$('sResSec'), tbody=$('sResTbody');
   if(!sec||!tbody) return;
 
-  // Prefer client-reported (sched-result); live host data as fallback
   const reportedIds=Object.keys(S.clientResults).filter(k=>k!=='__live__');
   const live=S.clientResults['__live__'];
   const hasReported=reportedIds.length>0;
-  const hasLive=live && Object.keys(live).length>0;
+  const hasLive=!!(live && Object.keys(live).length);
   if(!hasReported && !hasLive) return;
-
-  sec.style.display='block';
-  $('sResSubtitle').textContent = hasReported
-    ? reportedIds.length+'/'+Object.keys(S.clients).length+' client(s) reported'
-    : 'Live · updating as frames arrive';
 
   const cols=['g','b','p','a'];
   let rows='';
@@ -748,7 +739,6 @@ function renderFinalResults(){
     let sumTime=0, sumLat=0, sumEnergy=0, found=false;
 
     if(hasReported){
-      // SUM the per-client averages — each client processed different frames
       reportedIds.forEach(cid=>{
         const cr=S.clientResults[cid];
         if(cr && cr[sched] && cr[sched].frames>0){
@@ -760,6 +750,7 @@ function renderFinalResults(){
       });
     }
 
+    // Fall back to live data for this scheduler if not yet reported
     if(!found && hasLive && live[sched] && live[sched].frames>0){
       sumTime   = live[sched].avgTime   || 0;
       sumLat    = live[sched].avgLat    || 0;
@@ -767,7 +758,7 @@ function renderFinalResults(){
       found = true;
     }
 
-    if(!found) return;
+    if(!found) return; // no data for this scheduler yet — skip row
     totTime   += sumTime;
     totLat    += sumLat;
     totEnergy += sumEnergy;
@@ -780,13 +771,19 @@ function renderFinalResults(){
     </tr>`;
   });
 
-  // Total row: sum across all schedulers = whole-video aggregate
-  tbody.innerHTML = rows + (schedCount>0 ? `<tr class="tot">
+  if(!schedCount) return; // nothing to render yet
+
+  sec.style.display='block';
+  $('sResSubtitle').textContent = hasReported
+    ? reportedIds.length+'/'+Object.keys(S.clients).length+' client(s) reported'
+    : 'Live · updating as frames arrive';
+
+  tbody.innerHTML = rows + `<tr class="tot">
     <td>TOTAL</td>
     <td>${totTime.toFixed(4)}s</td>
     <td>${totLat.toFixed(1)}ms</td>
     <td>${totEnergy.toFixed(6)}KJ</td>
-  </tr>` : '');
+  </tr>`;
 }
 
 function updateSrvStats(){
@@ -872,9 +869,12 @@ function joinSession(){
 }
 
 function disconnectClient(){
+  // Send results FIRST while WS is still open, then close after a tick
   sendSchedResults();
   clearInterval(S.healthTimer);
-  if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
+  setTimeout(()=>{
+    if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
+  }, 300);
   $('cDot').className='dot'; $('discBtn').style.display='none';
   setStatus('c','Disconnected',''); resetJoin(); toast('Disconnected');
 }
@@ -930,8 +930,8 @@ async function handleFrame(data){
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
     wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, sched, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
-    // Send scheduler averages to host every 10 frames so results update live
-    if(S.frDone%10===0) sendSchedResults();
+    // Send scheduler averages every 5 frames so host results update live
+    if(S.frDone%5===0) sendSchedResults();
   };
   img.src=data.jpg;
 }
