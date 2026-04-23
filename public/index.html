@@ -593,8 +593,9 @@ function onClientResult(clientId, msg){
   updateCliCount(); updateClientUI(clientId); renderSrvDets(msg.dets);
   if(msg.dets.length) drawSrvBoxes(msg.dets,msg.fw,msg.fh);
   updateSrvStats();
-  // Build live results from data host already has
   buildLiveResults();
+  // Also show results section immediately on first result
+  if($('sResSec').style.display==='none') $('sResSec').style.display='block';
 }
 
 function onClientHealth(clientId, h){
@@ -626,13 +627,12 @@ function buildLiveResults(){
         totalFrames+=lats.length;
       }
     });
-    if(!totalFrames) return;
+    if(!totalFrames){ result[sched]={ avgTime:0, avgLat:0, avgEnergy:0, frames:0 }; return; }
     const avgLat=Math.round(totalLat/totalFrames);
     const avgTime=avgLat/1000;
     const avgEnergy=(POWER_W*avgTime)/1000;
     result[sched]={ avgTime, avgLat, avgEnergy, frames:totalFrames };
   });
-  // Merge into clientResults under a synthetic 'live' key
   S.clientResults['__live__']=result;
   renderFinalResults();
 }
@@ -740,14 +740,17 @@ function renderFinalResults(){
           cnt++;
         }
       });
-      if(cnt>0){ avgTime=sumTime; avgLat=sumLat; avgEnergy=sumEnergy; found=true; }
+      if(cnt>0){ avgTime=sumTime/cnt; avgLat=sumLat/cnt; avgEnergy=sumEnergy/cnt; found=true; }
     }
 
-    if(!found && hasLive && live[sched] && live[sched].frames>0){
-      avgTime   = live[sched].avgTime   || 0;
-      avgLat    = live[sched].avgLat    || 0;
-      avgEnergy = live[sched].avgEnergy || 0;
-      found=true;
+    if(!found && hasLive && live[sched]){
+      // Use live data even if frames=0 (will show 0s until data arrives)
+      if(live[sched].frames>0){
+        avgTime   = live[sched].avgTime   || 0;
+        avgLat    = live[sched].avgLat    || 0;
+        avgEnergy = live[sched].avgEnergy || 0;
+        found=true;
+      }
     }
 
     if(!found) return;
@@ -905,7 +908,7 @@ async function handleFrame(data){
     S.schedData[sched].frames++;
     const avgEnergy=S.cliEnergySum/S.frDone;
     const avgLat=Math.round(S.cliLats.reduce((a,b)=>a+b,0)/S.cliLats.length);
-    $('cFrDone').textContent=S.frDone; $('cObjFnd').textContent=S.objFound;
+    $('cFrDone').textContent=S.frDone+' (×4 scheds)'; $('cObjFnd').textContent=S.objFound;
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
     wsSend({ type:'result', code:S.code, clientId:S.myId, data:{ ts:data.ts, fw:img.width, fh:img.height, sched, dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
