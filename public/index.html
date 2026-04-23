@@ -698,7 +698,19 @@ function onClientResult(clientId, msg){
   if(dets.length) drawSrvBoxes(dets,msg.fw,msg.fh);
   updateSrvStats();
   renderFinalResults();
-  showClientFrameSummary();
+  // update frame distribution card
+  var fdList = document.getElementById('sFrameDistList');
+  if(fdList){
+    var rows = '';
+    Object.keys(S.clients).forEach(function(cid){
+      var c = S.clients[cid];
+      rows += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--bord)">'
+        +'<span style="font-size:13px;font-weight:700;color:var(--txt)">'+c.name+'</span>'
+        +'<span style="font-size:14px;font-family:var(--mono);color:var(--acc);font-weight:700">'+Math.floor(c.frames/4)+' frames</span>'
+        +'</div>';
+    });
+    fdList.innerHTML = rows || '<span style="color:var(--txt3)">Waiting...</span>';
+  }
 }
 
 function onClientHealth(clientId, h){
