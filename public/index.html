@@ -659,8 +659,9 @@ function onClientJoined(clientId){
     name:'Client '+n,
     health:{battery:100,cpu:50,throughput:50,fps:0},
     frames:0, dets:0, lats:[], pend:0,
+    dispatchedFrames:0,
     schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
-    tsMap:{} // ts -> sched, so host knows which sched a result belongs to
+    tsMap:{}
   };
   updateCliCount(); addClientUI(clientId);
   toast('Client '+n+' connected!');
@@ -761,16 +762,16 @@ function renderFinalResults(){
   // per-client frame breakdown
   const cliFramesEl = document.getElementById('sCliFrames');
   if(cliFramesEl){
-    const totalFrames = cids.reduce((a,cid)=>a+(S.clients[cid].frames||0),0);
-    cliFramesEl.innerHTML = cids.map(function(cid,i){
+    const totalSent = S.sent || 1;
+    cliFramesEl.innerHTML = cids.map(function(cid){
       const c = S.clients[cid];
-      const f = c.frames || 0;
-      const pct = totalFrames ? Math.round(f/totalFrames*100) : 0;
+      const f = c.dispatchedFrames || 0;
+      const pct = Math.round(f/totalSent*100);
       return '<div style="display:flex;align-items:center;gap:8px;margin-bottom:5px">'
         +'<div style="font-size:10px;font-family:var(--mono);color:var(--blue);width:60px;flex-shrink:0">'+c.name+'</div>'
         +'<div style="flex:1;height:4px;background:var(--surf3);border-radius:2px;overflow:hidden">'
         +'<div style="height:100%;border-radius:2px;background:var(--blue);width:'+pct+'%"></div></div>'
-        +'<div style="font-size:10px;font-family:var(--mono);color:var(--txt2);width:60px;text-align:right;flex-shrink:0">'+f+' frames</div>'
+        +'<div style="font-size:10px;font-family:var(--mono);color:var(--txt2);width:80px;text-align:right;flex-shrink:0">'+f+' / '+totalSent+' frames</div>'
         +'</div>';
     }).join('');
   }
@@ -830,17 +831,20 @@ function pickClientForSched(sched){
 function dispatch(jpg,fw,fh){
   const cids=Object.keys(S.clients);
   if(!cids.length) return;
+  const pickedThisFrame = new Set();
   SCHEDS.forEach(sched=>{
     const id = cids.length===1 ? cids[0] : pickClientForSched(sched);
     if(!id) return;
     const ts=Date.now();
-    // record ts→sched on host so result lookup is reliable
     if(S.clients[id]) S.clients[id].tsMap[ts]=sched;
     console.log('[HOST dispatch] sched='+sched+' to='+id+' ts='+ts);
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
     if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
+    pickedThisFrame.add(id);
   });
+  // count unique video frames per client (not per scheduler)
+  pickedThisFrame.forEach(id=>{ if(S.clients[id]) S.clients[id].dispatchedFrames++; });
   S.sent++;
   $('sFrSent').textContent=S.sent;
 }
