@@ -670,6 +670,7 @@ function onClientJoined(clientId){
     tsMap:{}
   };
   updateCliCount(); addClientUI(clientId);
+  updateFrameDistUI();
   toast('Client '+n+' connected!');
   setStatus('s',Object.keys(S.clients).length+' client(s) connected','g');
 }
@@ -698,19 +699,7 @@ function onClientResult(clientId, msg){
   if(dets.length) drawSrvBoxes(dets,msg.fw,msg.fh);
   updateSrvStats();
   renderFinalResults();
-  // update frame distribution card
-  var fdList = document.getElementById('sFrameDistList');
-  if(fdList){
-    var rows = '';
-    Object.keys(S.clients).forEach(function(cid){
-      var c = S.clients[cid];
-      rows += '<div style="display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid var(--bord)">'
-        +'<span style="font-size:13px;font-weight:700;color:var(--txt)">'+c.name+'</span>'
-        +'<span style="font-size:14px;font-family:var(--mono);color:var(--acc);font-weight:700">'+Math.floor(c.frames/4)+' frames</span>'
-        +'</div>';
-    });
-    fdList.innerHTML = rows || '<span style="color:var(--txt3)">Waiting...</span>';
-  }
+  updateFrameDistUI();
 }
 
 function onClientHealth(clientId, h){
@@ -1408,11 +1397,11 @@ function stopLiveRec(){ if(S.mr) S.mr.stop(); S.recording=false; $('recTogBtn').
 function copyCode(){ navigator.clipboard?.writeText(S.code).then(()=>toast('Code copied!')).catch(()=>toast('Code: '+S.code)); }
 function updateCliCount(){ const n=Object.keys(S.clients).length; $('sCliCnt').textContent=n; $('sCliSec').style.display=n?'block':'none'; }
 
-function showClientFrameSummary(){
+function updateFrameDistUI(){
   const list = document.getElementById('sFrameDistList');
   if(!list) return;
   const cids = Object.keys(S.clients);
-  if(!cids.length){ list.innerHTML='<span style="color:var(--txt3)">No clients</span>'; return; }
+  if(!cids.length){ list.innerHTML='<span style="color:var(--txt3)">Waiting...</span>'; return; }
   list.innerHTML = cids.map(function(id){
     const cli = S.clients[id];
     const f = Math.floor(cli.frames / 4);
@@ -1422,6 +1411,7 @@ function showClientFrameSummary(){
       +'</div>';
   }).join('');
 }
+function showClientFrameSummary(){ updateFrameDistUI(); }
 function addClientUI(id){
   const cli=S.clients[id],s=sid(id),el=document.createElement('div'); el.className='cliitem'; el.id='cli-'+s;
   el.innerHTML=`<div class="cliav">${cli.name.split(' ').pop()}</div><div class="cliinf"><div class="clinm">${cli.name}</div><div class="climt" id="clim-${s}">Connected</div><div style="font-size:9px;font-family:var(--mono);color:var(--acc);margin-top:3px" id="cliframes-${s}"></div><div class="hbrow"><div class="hbl">BAT</div><div class="hbt"><div class="hb" id="hbat-${s}" style="width:50%;background:var(--acc)"></div></div><div class="hbl" style="margin-left:5px">CPU</div><div class="hbt"><div class="hb" id="hcpu-${s}" style="width:50%;background:var(--blue)"></div></div></div></div><div class="clsc" id="clsc-${s}">--</div>`;
