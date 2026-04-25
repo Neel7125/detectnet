@@ -29,7 +29,7 @@ Host Device                  WS Server (Railway/Render)         Client Devices
 ## Architecture
 
 ### Transport
-All communication goes through a **WebSocket relay server** (`server.js`). No WebRTC or P2P — pure WebSocket, works across any network (4G, different WiFi, different countries).
+All communication goes through a **WebSocket relay server** (`server.js`) hosted on Railway. No WebRTC or P2P — pure WebSocket, works across any network (4G, different WiFi, different countries).
 
 ### Schedulers
 All four schedulers run **simultaneously** on every frame batch. Each one independently decides which client gets which frame based on device health scores.
@@ -61,7 +61,7 @@ detectnet-pro/
 │   ├── index.html      ← Full frontend (HTML + CSS + JS, single file)
 │   └── results.js      ← Scheduler result tracking & rendering module
 ├── api/
-│   └── signal.js       ← Vercel serverless signaling (Upstash Redis or in-memory)
+│   └── signal.js       ← Vercel serverless signaling (in-memory fallback)
 ├── server.js           ← WebSocket SFU relay server (Railway / Render)
 ├── vercel.json         ← Vercel routing, headers, function config
 ├── Procfile            ← For Railway / Render deployment
@@ -73,41 +73,20 @@ detectnet-pro/
 
 ## Deployment
 
-### Frontend + Signaling → Vercel
+### Frontend → Vercel
 
 1. Push to GitHub
 2. Go to [vercel.com/new](https://vercel.com/new) and import the repo
-3. Click **Deploy** — no config needed for basic use
+3. Click **Deploy** — no config needed
 
-#### Optional: Add Upstash Redis (recommended)
+### WebSocket Server → Railway
 
-Without Redis, signaling uses in-memory storage which can fail when Vercel routes requests to different serverless instances.
+The `server.js` relay needs a persistent Node.js host. Vercel serverless doesn't support WebSockets.
 
-1. Go to [upstash.com](https://upstash.com) → create a free Redis database
-2. Copy the **REST URL** and **REST Token**
-3. In Vercel → your project → Settings → Environment Variables:
-   ```
-   UPSTASH_REDIS_REST_URL   = https://xxx.upstash.io
-   UPSTASH_REDIS_REST_TOKEN = AxxxxxxxxxxxxxxxxxxxxxxxxxxxA
-   ```
-4. Redeploy
-
-### WebSocket Server → Railway or Render
-
-The `server.js` WebSocket relay needs a persistent Node.js host (Vercel serverless won't work for WebSockets).
-
-**Railway:**
-1. Create a new project → Deploy from GitHub repo
-2. Set start command: `node server.js`
-3. Railway auto-detects the `Procfile`
-
-**Render:**
-1. New Web Service → connect GitHub repo
-2. Build command: *(leave empty)*
-3. Start command: `node server.js`
-4. Free tier works fine
-
-Once deployed, update the WebSocket URL in `public/index.html` to point to your server.
+1. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub repo
+2. Railway auto-detects the `Procfile` and runs `node server.js`
+3. Once deployed, copy the Railway public URL
+4. Update the WebSocket URL in `public/index.html` to point to your Railway server
 
 ---
 
