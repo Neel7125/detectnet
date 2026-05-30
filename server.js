@@ -1,8 +1,11 @@
 // ═══════════════════════════════════════════════════════════════
 //  DetectNet Pro — WebSocket SFU/Relay Server
-//  Deploy on Railway / Render / any Node host (free tier works)
+//  Deploy on Render / Fly.io / Koyeb / any Node host (free tier)
 //  All signaling + frame relay goes through this server.
 //  No WebRTC P2P needed — pure WebSocket, works on any network.
+//
+//  Environment variables:
+//    PORT  — set automatically by the hosting platform (default 3001)
 // ═══════════════════════════════════════════════════════════════
 import { WebSocketServer, WebSocket } from 'ws';
 import { createServer } from 'http';

@@ -529,7 +529,12 @@ var RES = (function() {
 //  Host aggregates all clients → final result table.
 // ══════════════════════════════════════════════════════════════════
 
-const WS_URL = 'wss://web-production-067c7.up.railway.app';
+// ── WebSocket server URL ──────────────────────────────────────────
+// Update this to your new backend URL after deploying server.js.
+// Render:  wss://your-app-name.onrender.com
+// Fly.io:  wss://your-app-name.fly.dev
+// Koyeb:   wss://your-app-name.koyeb.app
+const WS_URL = 'wss://your-app-name.onrender.com';
 
 const POWER_W    = 15;
 const CAPTURE_MS = 220;

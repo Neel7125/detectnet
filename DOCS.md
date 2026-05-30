@@ -56,13 +56,13 @@ Host Device                  WS Server (Railway)              Client Devices
 
 ### Transport
 
-All communication goes through a **WebSocket relay server** (`server.js`) hosted on Railway. The server is a pure message broker — it never processes video or runs inference. It only routes messages between the host and clients.
+All communication goes through a **WebSocket relay server** (`server.js`) hosted on Render (or Fly.io / Koyeb). The server is a pure message broker — it never processes video or runs inference. It only routes messages between the host and clients.
 
 The server maintains a session store (`Map`) where each session holds:
 - `hostWs` — the host's WebSocket connection
 - `clients` — a Map of `clientId → WebSocket`
 
-A heartbeat runs every 25 seconds to ping all connections and drop dead ones. This also prevents Railway from sleeping the server.
+A heartbeat runs every 25 seconds to ping all connections and drop dead ones. This also prevents Render from sleeping the server (on paid tiers; free tier still sleeps after 15min).
 
 ### Frontend
 
@@ -112,18 +112,44 @@ detectnet-pro/
 - `X-Frame-Options: DENY`
 - `Permissions-Policy: camera=*, microphone=()`
 
-### WebSocket Server → Railway
+### WebSocket Server → Render (recommended free option)
 
-Vercel serverless does not support persistent WebSocket connections. The relay server needs a separate host.
+Vercel serverless does not support persistent WebSocket connections. The relay server needs a separate persistent host.
 
-1. Go to [railway.app](https://railway.app) → New Project → Deploy from GitHub
-2. Railway detects the `Procfile` and runs `node server.js`
-3. Copy the Railway public URL (e.g. `wss://your-app.up.railway.app`)
-4. Update `WS_URL` in `public/index.html`:
+1. Go to [render.com](https://render.com) → New → **Web Service**
+2. Connect your GitHub repo
+3. Set the following:
+   - **Environment**: `Node`
+   - **Build Command**: *(leave blank)*
+   - **Start Command**: `node server.js`
+   - **Instance Type**: Free
+4. Click **Create Web Service** — Render detects the `Procfile` automatically
+5. Wait for the deploy to finish, then copy your service URL (e.g. `your-app-name.onrender.com`)
+6. Update `WS_URL` in `public/index.html`:
 
 ```js
-const WS_URL = 'wss://your-app.up.railway.app';
+const WS_URL = 'wss://your-app-name.onrender.com';
 ```
+
+7. Redeploy the Vercel frontend (or just push to GitHub if auto-deploy is on)
+
+> **Note:** Render free tier spins down after 15 minutes of inactivity. The first connection after sleep takes ~30 seconds. If this is a problem, use Fly.io or Koyeb (both have always-on free tiers).
+
+### Alternative: Fly.io (always-on free tier)
+
+1. Install the Fly CLI: `npm install -g flyctl`
+2. Run `flyctl auth login`
+3. From the `detectnet/` folder: `flyctl launch` — accept defaults, choose a region
+4. Deploy: `flyctl deploy`
+5. Your URL will be `wss://your-app-name.fly.dev`
+6. Update `WS_URL` in `public/index.html` to that URL
+
+### Alternative: Koyeb (always-on free tier)
+
+1. Go to [koyeb.com](https://koyeb.com) → Create App → GitHub
+2. Select the repo, set **Run command** to `node server.js`
+3. Your URL will be `wss://your-app-name.koyeb.app`
+4. Update `WS_URL` in `public/index.html` to that URL
 
 ### Optional: Upstash Redis (for signaling)
 
@@ -332,7 +358,7 @@ Constants in `public/index.html`:
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `WS_URL` | Railway URL | WebSocket relay server address |
+| `WS_URL` | Render/Fly.io URL | WebSocket relay server address |
 | `POWER_W` | `15` | Assumed device power draw in watts (for energy estimation) |
 | `CAPTURE_MS` | `220` | Frame capture interval in milliseconds (~4.5 fps) |
 | `RESMAP` | 240/480/720p | Resolution presets for live camera |
@@ -348,7 +374,7 @@ Constants in `public/index.html`:
 | Transport | WebSocket (`ws` v8.17.1) |
 | Signaling | Vercel Serverless + Upstash Redis (optional) |
 | Frontend host | Vercel |
-| WS server host | Railway or Render |
+| WS server host | Render / Fly.io / Koyeb |
 | Runtime | Node.js 18+ |
 
 ---
