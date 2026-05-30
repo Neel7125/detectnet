@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="theme-color" content="#07070f">
 <title>DetectNet Pro</title>
 <style>
@@ -586,6 +587,7 @@ function goClient(){ S.mode='client'; show('cliScr'); initClient(); }
 function cleanup(){
   clearInterval(S.capTimer); clearInterval(S.healthTimer); clearInterval(S._pingTimer);
   stopStream();
+  releaseWakeLock();
   if(S.ws){ try{S.ws.close();}catch(e){} }
   Object.assign(S,{
     ws:null, clients:{}, stream:null, capTimer:null,
@@ -629,6 +631,91 @@ function startWSPing(){
   S._pingTimer = setInterval(()=>{ wsSend({ type:'ping' }); }, 20000);
 }
 
+// ── Wake Lock — keep screen/CPU alive ────────────────────────────
+let _wakeLock = null;
+async function requestWakeLock(){
+  if(!('wakeLock' in navigator)) return;
+  try{
+    _wakeLock = await navigator.wakeLock.request('screen');
+    _wakeLock.addEventListener('release', ()=>{ _wakeLock = null; });
+    console.log('[WakeLock] acquired');
+  }catch(e){ console.warn('[WakeLock] failed:', e.message); }
+}
+async function reacquireWakeLock(){
+  if(_wakeLock === null) await requestWakeLock();
+}
+function releaseWakeLock(){
+  if(_wakeLock){ _wakeLock.release(); _wakeLock = null; }
+}
+
+// ── Visibility / background handling ─────────────────────────────
+document.addEventListener('visibilitychange', async ()=>{
+  if(document.visibilityState === 'visible'){
+    // Re-acquire wake lock (it's released automatically when hidden)
+    await reacquireWakeLock();
+    // If WS is dead, reconnect
+    if(S.ws && S.ws.readyState !== WebSocket.OPEN && S.mode){
+      console.log('[Visibility] page visible, WS dead — reconnecting');
+      toast('Reconnecting...');
+      if(S.mode === 'server') _wsReconnectServer();
+      else if(S.mode === 'client') _wsReconnectClient();
+    }
+  }
+});
+
+function _wsReconnectServer(){
+  if(!S.code || !S.myId) return;
+  connectWS(
+    (ws)=>{
+      startWSPing();
+      wsSend({ type:'host-create', code:S.code, clientId:S.myId });
+    },
+    (msg)=>{
+      if(msg.type==='host-ready'){
+        $('sDot').className='dot g';
+        setStatus('s','Reconnected · session live','g');
+        toast('Reconnected! Code: '+S.code);
+        // Restart capture if camera was running
+        if(S.stream && !S.capTimer) startCapture();
+      }
+      if(msg.type==='client-joined') onClientJoined(msg.clientId);
+      if(msg.type==='client-left')   onClientDrop(msg.clientId);
+      if(msg.type==='result')        onClientResult(msg.from, msg);
+      if(msg.type==='health')        onClientHealth(msg.from, msg.h);
+      if(msg.type==='sched-result')  onClientSchedResult(msg.from, msg.data);
+    },
+    ()=>{
+      $('sDot').className='dot r';
+      setStatus('s','Server disconnected — tap ↺ to reconnect','r');
+    }
+  );
+}
+
+function _wsReconnectClient(){
+  if(!S.code || !S.myId) return;
+  connectWS(
+    ()=>{
+      startWSPing();
+      wsSend({ type:'client-join', code:S.code, clientId:S.myId });
+    },
+    (msg)=>{
+      if(msg.type==='joined'){
+        $('cDot').className='dot g';
+        setStatus('c','Reconnected — receiving frames','g');
+        toast('Reconnected!');
+      }
+      if(msg.type==='error'){ toast(msg.msg||'Reconnect error'); setStatus('c',msg.msg||'Error','r'); }
+      if(msg.type==='frame')     handleFrame(msg);
+      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
+    },
+    ()=>{
+      $('cDot').className='dot r';
+      setStatus('c','Disconnected — tap ↺ to retry','r');
+      resetJoin(); $('discBtn').style.display='none';
+    }
+  );
+}
+
 // ══════════════════════════════════════════════════════════════════
 //  SERVER — INIT
 // ══════════════════════════════════════════════════════════════════
@@ -641,6 +728,7 @@ function initServer(){
   connectWS(
     (ws)=>{
       startWSPing();
+      requestWakeLock();
       wsSend({ type:'host-create', code:S.code, clientId:S.myId });
     },
     (msg)=>{
@@ -917,6 +1005,7 @@ function joinSession(){
   connectWS(
     ()=>{
       startWSPing();
+      requestWakeLock();
       wsSend({ type:'client-join', code:S.code, clientId:S.myId });
     },
     (msg)=>{
@@ -953,6 +1042,7 @@ function disconnectClient(){
   // Send results FIRST while WS is still open, then close after a tick
   sendSchedResults();
   clearInterval(S.healthTimer);
+  releaseWakeLock();
   setTimeout(()=>{
     if(S.ws){ try{S.ws.close();}catch(e){} S.ws=null; }
   }, 300);
