@@ -13,15 +13,15 @@ Host Device                  WS Server (Railway/Render)         Client Devices
 (camera / video)             ─────────────────────────          (any phone/browser)
       │                               │                                │
       ├── host-create ───────────────►│                                │
-      │                               │◄─── client-join ──────────────┤
+      │                               │◄─── client-join ───────────────┤
       │                               ├─── joined ────────────────────►│
       │◄── client-joined ─────────────┤                                │
       │                               │                                │
-      ├── frame (jpg + sched) ────────►│─── frame ─────────────────────►│
+      ├── frame (jpg + sched) ───────►│─── frame ─────────────────────►│
       │                               │◄── result (dets + metrics) ────┤
       │◄── result ────────────────────┤                                │
       │                               │◄── sched-result (per-sched) ───┤
-      └──────────── Scheduler Results Table ──────────────────────────┘
+      └───────────── Scheduler Results Table ──────────────────────────┘
 ```
 
 ---
