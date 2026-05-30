@@ -534,7 +534,7 @@ var RES = (function() {
 // Render:  wss://your-app-name.onrender.com
 // Fly.io:  wss://your-app-name.fly.dev
 // Koyeb:   wss://your-app-name.koyeb.app
-const WS_URL = 'wss://your-app-name.onrender.com';
+const WS_URL = 'wss://https://detectnet-1.onrender.com';
 
 const POWER_W    = 15;
 const CAPTURE_MS = 220;
@@ -1233,15 +1233,28 @@ async function sendUploadFrames(){
   $('upProg').style.display='block';
   $('sendFrBtn').disabled=true;
   $('upProgBar').style.width='0%';
-  $('upProgLbl').textContent='Extracting 0 / '+numFrames+' frames...';
+  $('upProgLbl').textContent='Extracting & sending 0 / '+numFrames+' frames...';
 
-  let frames;
+  S.sessStart = Date.now();
+  let sent = 0;
+
+  // Dispatch each frame immediately as it is extracted — no waiting for all frames.
+  // extractFrames calls onP(done, total) after each frame is captured;
+  // we pass an extra onFrame callback that fires with the frame data right away.
   try{
-    frames = await extractFrames(S._vidUrl, S._vidDuration, numFrames, (done, total)=>{
-      const pct = Math.round(done/total*100);
-      $('upProgBar').style.width = pct+'%';
-      $('upProgLbl').textContent = 'Extracting '+done+' / '+total+' frames...';
-    });
+    await extractFrames(S._vidUrl, S._vidDuration, numFrames,
+      // onP — progress update
+      (done, tot)=>{
+        const pct = Math.round(done/tot*100);
+        $('upProgBar').style.width = pct+'%';
+        $('upProgLbl').textContent = 'Extracting & sending '+done+' / '+tot+' frames...';
+      },
+      // onFrame — called with each frame object the moment it is ready
+      (frame)=>{
+        dispatch(frame.jpg, frame.w, frame.h);
+        sent++;
+      }
+    );
   }catch(e){
     toast('Extract error: '+e.message);
     $('sendFrBtn').disabled=false;
@@ -1249,17 +1262,9 @@ async function sendUploadFrames(){
     return;
   }
 
-  // frames.length === numFrames exactly
-  $('upProgLbl').textContent = 'Sending '+frames.length+' frames to clients...';
-  S.sessStart = Date.now();
-  for(let i=0;i<frames.length;i++){
-    dispatch(frames[i].jpg, frames[i].w, frames[i].h);
-    $('upProgBar').style.width = Math.round((i+1)/frames.length*100)+'%';
-    await sleep(30);
-  }
-  $('upProgLbl').textContent = '✓ All '+frames.length+' frames sent!';
+  $('upProgLbl').textContent = '✓ All '+sent+' frames extracted & sent!';
   $('sendFrBtn').disabled = false;
-  toast('Done! '+frames.length+' frames sent');
+  toast('Done! '+sent+' frames sent');
   // wait for results to come back before showing frame counts
   setTimeout(showClientFrameSummary, 3000);
 }
@@ -1270,7 +1275,7 @@ async function sendUploadFrames(){
 //   → fires exactly when a new decoded frame is painted, 100% reliable.
 // Falls back to seek + double-rAF for other browsers.
 // Callback: onP(framesExtracted, totalFrames)
-function extractFrames(srcUrl, duration, num, onP){
+function extractFrames(srcUrl, duration, num, onP, onFrame){
   return new Promise((resolve, reject)=>{
     if(!duration||isNaN(duration)||duration<=0){
       reject(new Error('Invalid video duration')); return;
@@ -1310,7 +1315,9 @@ function extractFrames(srcUrl, duration, num, onP){
 
     function capture(){
       ctx.drawImage(vid, 0, 0, 854, 480);
-      frames.push({ jpg: tmp.toDataURL('image/jpeg', 0.7), w:854, h:480 });
+      const frame = { jpg: tmp.toDataURL('image/jpeg', 0.7), w:854, h:480 };
+      frames.push(frame);
+      onFrame && onFrame(frame);   // ← dispatch immediately, don't wait for all frames
       onP && onP(frames.length, num);
       idx++;
       if(idx >= num){ finish(); return; }
@@ -1378,10 +1385,13 @@ async function sendRecFrames(){
   });
   if(!dur){ toast('Could not read recording duration'); return; }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--amb)">Extracting & sending...</div><div class="pwrap" style="margin-top:6px"><div class="pbar b" id="rp" style="width:0%"></div></div>';
-  const frames=await extractFrames(url, dur, 60, (done,total)=>{ const b=$('rp'); if(b) b.style.width=Math.round(done/total*100)+'%'; });
-  S.sessStart=Date.now();
-  for(let i=0;i<frames.length;i++){ dispatch(frames[i].jpg,frames[i].w,frames[i].h); await sleep(45); }
-  $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--acc)">✓ Sent '+frames.length+' frames!</div>';
+  S.sessStart = Date.now();
+  let recSent = 0;
+  await extractFrames(url, dur, 60,
+    (done,total)=>{ const b=$('rp'); if(b) b.style.width=Math.round(done/total*100)+'%'; },
+    (frame)=>{ dispatch(frame.jpg, frame.w, frame.h); recSent++; }
+  );
+  $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--acc)">✓ Sent '+recSent+' frames!</div>';
   toast('Done!');
   setTimeout(showClientFrameSummary, 3000);
 }
