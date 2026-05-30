@@ -8,21 +8,9 @@ A distributed, real-time object detection system that splits AI inference work a
 
 One device acts as the **Host** — it streams a live camera feed, uploads a video, or records a clip. Connected **Client** devices receive frames over WebSocket, run on-device COCO-SSD object detection (via TensorFlow.js), and report results back. The host aggregates detections and compares the performance of all four schedulers side-by-side.
 
-```
-Host Device                  WS Server (Railway/Render)         Client Devices
-(camera / video)             ─────────────────────────          (any phone/browser)
-      │                               │                                │
-      ├── host-create ───────────────►│                                │
-      │                               │◄─── client-join ───────────────┤
-      │                               ├─── joined ────────────────────►│
-      │◄── client-joined ─────────────┤                                │
-      │                               │                                │
-      ├── frame (jpg + sched) ───────►│─── frame ─────────────────────►│
-      │                               │◄── result (dets + metrics) ────┤
-      │◄── result ────────────────────┤                                │
-      │                               │◄── sched-result (per-sched) ───┤
-      └───────────── Scheduler Results Table ──────────────────────────┘
-```
+<img width="1280" height="853" alt="image" src="https://github.com/user-attachments/assets/98a4791f-6968-4285-af0f-7416135e822c" />
+
+
 
 ---
 
