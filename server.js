@@ -90,10 +90,27 @@ wss.on('connection', (ws) => {
       ws._code = code;
       ws._role = 'client';
       session.clients.set(clientId, ws);
+
+      // Extract real IP — handle reverse-proxy X-Forwarded-For (Render, Railway, etc.)
+      const forwarded = ws._socket && ws._socket._httpMessage && ws._socket._httpMessage.headers
+        ? ws._socket._httpMessage.headers['x-forwarded-for']
+        : null;
+      // ws.upgradeReq is available in some versions; fall back to _socket
+      const upgradeHeaders = ws.upgradeReq ? ws.upgradeReq.headers : {};
+      const xfwd = upgradeHeaders['x-forwarded-for'] || forwarded || '';
+      const rawIp = ws._socket ? ws._socket.remoteAddress : '';
+      const ip = (xfwd ? xfwd.split(',')[0].trim() : rawIp)
+                   .replace(/^::ffff:/, ''); // strip IPv4-mapped IPv6 prefix
+
       send(ws, { type: 'joined', hostId: session.hostId });
-      // Notify host
-      send(session.hostWs, { type: 'client-joined', clientId });
-      log('CLIENT', code, 'CLIENT_JOINED', { clientId, totalClients: session.clients.size });
+      // Notify host — include ip and device info from the join message
+      send(session.hostWs, {
+        type: 'client-joined',
+        clientId,
+        ip,
+        deviceInfo: (data && data.deviceInfo) || ''
+      });
+      log('CLIENT', code, 'CLIENT_JOINED', { clientId, ip, totalClients: session.clients.size });
       return;
     }
 

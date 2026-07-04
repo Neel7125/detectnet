@@ -889,7 +889,7 @@ function _wsReconnectServer(){
         // Restart capture if camera was running
         if(S.stream && !S.capTimer) startCapture();
       }
-      if(msg.type==='client-joined') onClientJoined(msg.clientId);
+      if(msg.type==='client-joined') onClientJoined(msg.clientId, msg.ip, msg.deviceInfo);
       if(msg.type==='client-left')   onClientDrop(msg.clientId);
       if(msg.type==='result')        onClientResult(msg.from, msg);
       if(msg.type==='health')        onClientHealth(msg.from, msg.h);
@@ -907,7 +907,7 @@ function _wsReconnectClient(){
   connectWS(
     ()=>{
       startWSPing();
-      wsSend({ type:'client-join', code:S.code, clientId:S.myId });
+      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: getDeviceInfo() } });
     },
     (msg)=>{
       if(msg.type==='joined'){
@@ -953,7 +953,7 @@ function initServer(){
         setStatus('s','Session live · waiting for clients','g');
         toast('Session ready! Code: '+S.code);
       }
-      if(msg.type==='client-joined') onClientJoined(msg.clientId);
+      if(msg.type==='client-joined') onClientJoined(msg.clientId, msg.ip, msg.deviceInfo);
       if(msg.type==='client-left')   onClientDrop(msg.clientId);
       if(msg.type==='result')        onClientResult(msg.from, msg);
       if(msg.type==='health')        onClientHealth(msg.from, msg.h);
@@ -966,10 +966,17 @@ function initServer(){
   );
 }
 
-function onClientJoined(clientId){
+function onClientJoined(clientId, ip, deviceInfo){
   const n = Object.keys(S.clients).length+1;
+  // Build display name: device info + IP if available, else fallback to "Client N"
+  const ipTag  = ip       ? ' ['+ip+']'       : '';
+  const devTag = deviceInfo ? deviceInfo       : ('Client '+n);
+  const name   = devTag + ipTag;
+  const short  = ip ? ip.split('.').pop() : String(n); // avatar text: last IP octet or number
+
   S.clients[clientId]={
-    name:'Client '+n,
+    name: name,
+    short: short,
     health:{battery:100,cpu:50,throughput:50,fps:0},
     frames:0, dets:0, lats:[], pend:0,
     dispatchedFrames:0,
@@ -978,9 +985,9 @@ function onClientJoined(clientId){
   };
   updateCliCount(); addClientUI(clientId);
   updateFrameDistUI();
-  toast('Client '+n+' connected!');
+  toast(name+' connected!');
   setStatus('s',Object.keys(S.clients).length+' client(s) connected','g');
-  LOG.event('CLIENT_JOINED', { clientId: clientId, name: 'Client '+n, totalClients: Object.keys(S.clients).length });
+  LOG.event('CLIENT_JOINED', { clientId: clientId, name: name, ip: ip||'?', device: deviceInfo||'?', totalClients: Object.keys(S.clients).length });
 }
 
 function onClientDrop(clientId){
@@ -1226,6 +1233,42 @@ async function loadModel(){
 
 function resetJoin(){ $('joinBtn').disabled=!S.modelOk; $('joinBtn').textContent='Connect to Session'; }
 
+// Parse a compact device label from the user-agent string
+// Returns e.g. "iPhone · Safari", "Android 14 · Chrome", "Windows 10 · Edge"
+function getDeviceInfo(){
+  const ua = navigator.userAgent || '';
+  let os = '', browser = '';
+
+  // OS / device
+  if (/iPhone/.test(ua))              os = 'iPhone';
+  else if (/iPad/.test(ua))           os = 'iPad';
+  else if (/Android/.test(ua)){
+    const m = ua.match(/Android\s+([\d.]+)/);
+    os = 'Android' + (m ? ' '+m[1] : '');
+  }
+  else if (/Windows NT/.test(ua)){
+    const m = ua.match(/Windows NT ([\d.]+)/);
+    const ver = {'10.0':'10','6.3':'8.1','6.2':'8','6.1':'7'}[(m&&m[1])] || (m&&m[1]) || '';
+    os = 'Windows' + (ver ? ' '+ver : '');
+  }
+  else if (/Mac OS X/.test(ua)){
+    const m = ua.match(/Mac OS X ([\d_]+)/);
+    os = 'macOS' + (m ? ' '+m[1].replace(/_/g,'.') : '');
+  }
+  else if (/Linux/.test(ua))          os = 'Linux';
+  else                                os = 'Device';
+
+  // Browser
+  if      (/Edg\//.test(ua))          browser = 'Edge';
+  else if (/SamsungBrowser/.test(ua)) browser = 'Samsung';
+  else if (/OPR\/|Opera/.test(ua))    browser = 'Opera';
+  else if (/Chrome\//.test(ua))       browser = 'Chrome';
+  else if (/Firefox\//.test(ua))      browser = 'Firefox';
+  else if (/Safari\//.test(ua))       browser = 'Safari';
+
+  return browser ? os + ' \xb7 ' + browser : os;
+}
+
 function joinSession(){
   const code=$('codeInp').value.trim().toUpperCase();
   if(code.length!==6){ toast('Enter 6-character code'); return; }
@@ -1243,7 +1286,7 @@ function joinSession(){
     ()=>{
       startWSPing();
       requestWakeLock();
-      wsSend({ type:'client-join', code:S.code, clientId:S.myId });
+      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: getDeviceInfo() } });
     },
     (msg)=>{
       console.log('[Client] msg:', msg.type);
@@ -1790,7 +1833,7 @@ function updateFrameDistUI(){
 function showClientFrameSummary(){ updateFrameDistUI(); }
 function addClientUI(id){
   const cli=S.clients[id],s=sid(id),el=document.createElement('div'); el.className='cliitem'; el.id='cli-'+s;
-  el.innerHTML=`<div class="cliav">${cli.name.split(' ').pop()}</div><div class="cliinf"><div class="clinm">${cli.name}</div><div class="climt" id="clim-${s}">Connected</div><div style="font-size:9px;font-family:var(--mono);color:var(--acc);margin-top:3px" id="cliframes-${s}"></div><div class="hbrow"><div class="hbl">BAT</div><div class="hbt"><div class="hb" id="hbat-${s}" style="width:50%;background:var(--acc)"></div></div><div class="hbl" style="margin-left:5px">CPU</div><div class="hbt"><div class="hb" id="hcpu-${s}" style="width:50%;background:var(--blue)"></div></div></div></div><div class="clsc" id="clsc-${s}">--</div>`;
+  el.innerHTML=`<div class="cliav">${cli.short||'?'}</div><div class="cliinf"><div class="clinm">${cli.name}</div><div class="climt" id="clim-${s}">Connected</div><div style="font-size:9px;font-family:var(--mono);color:var(--acc);margin-top:3px" id="cliframes-${s}"></div><div class="hbrow"><div class="hbl">BAT</div><div class="hbt"><div class="hb" id="hbat-${s}" style="width:50%;background:var(--acc)"></div></div><div class="hbl" style="margin-left:5px">CPU</div><div class="hbt"><div class="hb" id="hcpu-${s}" style="width:50%;background:var(--blue)"></div></div></div></div><div class="clsc" id="clsc-${s}">--</div>`;
   $('sCliList').appendChild(el);
 }
 function updateClientUI(id){
