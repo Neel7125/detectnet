@@ -365,6 +365,25 @@ body{color:var(--txt);font-family:var(--disp)}
         </table>
       </div>
     </div>
+    <!-- ── Experiment Log Panel ── -->
+    <div class="card">
+      <div class="sechd">
+        <span class="sect">Experiment Log</span>
+        <div style="display:flex;gap:7px">
+          <span class="seca" onclick="LOG.download()" title="Export .txt">⬇ Export</span>
+          <span class="seca" onclick="LOG.clear();document.getElementById('logList').innerHTML=''" title="Clear log">✕ Clear</span>
+        </div>
+      </div>
+      <div style="display:flex;gap:7px;margin-bottom:8px;flex-wrap:wrap">
+        <button class="btn btn-gh btn-sm" id="logTogBtn" onclick="LOG.togglePanel()">📋 Event Log</button>
+        <button class="btn btn-r btn-sm" onclick="experimentReset()" title="Reset all counters for a fresh run">↺ Reset Experiment</button>
+      </div>
+      <div id="logPanel" style="display:none">
+        <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);margin-bottom:5px">Latest 200 events · newest first</div>
+        <div id="logList" style="max-height:260px;overflow-y:auto;padding-right:4px"></div>
+      </div>
+    </div>
+
     <div style="height:10px"></div>
   </div>
 </div>
@@ -432,6 +451,132 @@ body{color:var(--txt);font-family:var(--disp)}
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.10.0/dist/tf.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.2/dist/coco-ssd.min.js"></script>
 <script>
+// ══════════════════════════════════════════════════════════════════
+//  LOG module — Wireshark-style per-frame event log
+//  Tracks every frame lifecycle: dispatch → relay → detect → result
+//  Call LOG.event(type, data) from anywhere.
+//  LOG.download() exports the full log as a .txt file.
+// ══════════════════════════════════════════════════════════════════
+var LOG = (function(){
+  var _entries = [];
+  var _expId   = 0;   // increments each reset
+  var _t0      = Date.now(); // session wall-clock anchor
+
+  // Column widths for aligned text output
+  var _maxType = 20;
+
+  function _ts(){ return Date.now() - _t0; }
+  function _iso(){ return new Date().toISOString(); }
+  function _pad(s,n){ s=String(s); while(s.length<n) s+=' '; return s; }
+
+  // type   : string  (e.g. 'DISPATCH', 'RESULT_OK', 'DETECT_DONE', 'FRAME_FAIL')
+  // data   : object  (key-value pairs, all serialised as strings)
+  function event(type, data){
+    var entry = {
+      exp:  _expId,
+      absTime: _iso(),
+      relMs:   _ts(),
+      type:    type,
+      data:    data || {}
+    };
+    _entries.push(entry);
+    // Mirror to console in a readable line
+    var parts = ['[LOG]'];
+    parts.push('[EXP-'+_expId+']');
+    parts.push('[+'+entry.relMs+'ms]');
+    parts.push(_pad(type, _maxType));
+    Object.keys(entry.data).forEach(function(k){ parts.push(k+'='+entry.data[k]); });
+    console.log(parts.join('  '));
+    // Refresh log panel if visible
+    _renderPanel();
+  }
+
+  function reset(newExpId){
+    _expId = (newExpId != null) ? newExpId : (_expId + 1);
+    _t0    = Date.now();
+    event('EXP_RESET', { expId: _expId });
+  }
+
+  function clear(){
+    _entries = [];
+    _t0 = Date.now();
+    _renderPanel();
+  }
+
+  function download(){
+    var header = [
+      '# DetectNet Pro — Frame Event Log',
+      '# Generated : ' + new Date().toISOString(),
+      '# Columns   : EXP | AbsoluteTime | RelMs | Type | KeyValuePairs',
+      '#',
+      _pad('EXP',4)+' '+_pad('AbsoluteTime',26)+' '+_pad('RelMs',8)+' '+_pad('Type',22)+' Details',
+      '─'.repeat(120)
+    ].join('\n');
+
+    var lines = _entries.map(function(e){
+      var details = Object.keys(e.data).map(function(k){ return k+'='+e.data[k]; }).join('  ');
+      return _pad(e.exp,4)+' '+_pad(e.absTime,26)+' '+_pad(e.relMs+'ms',8)+' '+_pad(e.type,22)+' '+details;
+    });
+
+    var txt = header + '\n' + lines.join('\n');
+    var blob = new Blob([txt], { type:'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'detectnet_log_'+new Date().toISOString().replace(/[:.]/g,'-')+'.txt';
+    a.click();
+  }
+
+  function getEntries(){ return _entries.slice(); }
+  function getExpId(){ return _expId; }
+
+  // ── In-page log panel renderer ───────────────────────────────
+  function _renderPanel(){
+    var el = document.getElementById('logPanel');
+    if(!el || el.style.display==='none') return;
+    var list = document.getElementById('logList');
+    if(!list) return;
+    // Show last 200 entries newest-first
+    var show = _entries.slice(-200).reverse();
+    var TYPE_COLOR = {
+      'DISPATCH':'#00ff88', 'RESULT_OK':'#4d8fff', 'DETECT_DONE':'#aa66ff',
+      'FRAME_FAIL':'#ff4466', 'FRAME_TIMEOUT':'#ffaa00', 'EXP_RESET':'#ffaa00',
+      'CLIENT_JOINED':'#00ff88','CLIENT_LEFT':'#ff4466','HOST_RESET':'#ffaa00',
+      'FRAME_DROP':'#ff4466','RELAY_FRAME':'#4d8fff','DETECT_ERR':'#ff4466',
+      'CLIENT_RESET':'#ffaa00'
+    };
+    list.innerHTML = show.map(function(e){
+      var col = TYPE_COLOR[e.type] || '#7878a0';
+      var dets = Object.keys(e.data).map(function(k){
+        return '<span style="color:var(--txt2)">'+k+'=</span><span style="color:var(--txt)">'+e.data[k]+'</span>';
+      }).join('  ');
+      return '<div style="border-bottom:1px solid var(--bord);padding:4px 0;font-size:10px;font-family:var(--mono);line-height:1.5">'
+        +'<span style="color:var(--txt3)">[EXP-'+e.exp+'] [+'+e.relMs+'ms]</span>  '
+        +'<span style="color:'+col+';font-weight:700">'+e.type+'</span>  '+dets
+        +'</div>';
+    }).join('');
+  }
+
+  function togglePanel(){
+    var el=document.getElementById('logPanel');
+    if(!el) return;
+    var vis = el.style.display==='none';
+    el.style.display = vis ? 'block' : 'none';
+    if(vis) _renderPanel();
+    var btn=document.getElementById('logTogBtn');
+    if(btn) btn.textContent = vis ? '▲ Hide Log' : '📋 Event Log';
+  }
+
+  return {
+    event:       event,
+    reset:       reset,
+    clear:       clear,
+    download:    download,
+    getEntries:  getEntries,
+    getExpId:    getExpId,
+    togglePanel: togglePanel
+  };
+})();
+
 // ── RES module — inline (vercel rewrites block external .js files) ──
 var RES = (function() {
   var schedData = {};
@@ -599,6 +744,74 @@ function cleanup(){
   });
 }
 
+// ── Experiment Reset ─────────────────────────────────────────────
+// Call before starting a new frame-sending run within the same session.
+// Resets all counters on host AND notifies all clients to reset theirs.
+function experimentReset(){
+  const prevExp = LOG.getExpId();
+  LOG.reset(); // increments expId, logs EXP_RESET
+
+  // ── Reset host-side counters ──────────────────────────────
+  S.sent      = 0;
+  S.totalDet  = 0;
+  S.lats      = [];
+  S.sessStart = Date.now();
+  S.schedSent = { greedy:0, pso:0, mompso:0, 'mompso-ga':0 };
+
+  // Reset per-client state (keep client objects, just zero the metrics)
+  Object.keys(S.clients).forEach(id=>{
+    const cli = S.clients[id];
+    cli.frames = 0;
+    cli.dets   = 0;
+    cli.lats   = [];
+    cli.pend   = 0;
+    cli.dispatchedFrames = 0;
+    cli.schedLats = { greedy:[], pso:[], mompso:[], 'mompso-ga':[] };
+    cli.tsMap  = {};
+  });
+
+  // Reset RES module
+  RES.hostReset();
+
+  // Reset UI counters
+  $('sFrSent').textContent = '0';
+  $('sTotDet').textContent = '0';
+  $('sAvgLat').textContent = '0ms';
+  const sResSec = $('sResSec');
+  if(sResSec) sResSec.style.display='none';
+  const tbody = $('sResTbody');
+  if(tbody) tbody.innerHTML='';
+  updateFrameDistUI();
+
+  // Notify all connected clients to reset their counters
+  const newExpId = LOG.getExpId();
+  wsSend({ type:'exp-reset', code:S.code, clientId:S.myId, data:{ expId: newExpId } });
+
+  LOG.event('HOST_RESET', { prevExp: prevExp, newExp: newExpId, clients: Object.keys(S.clients).length });
+  toast('Experiment reset \u2713 \u2014 starting fresh');
+}
+
+// Reset client-side counters (called when host sends exp-reset message)
+function clientExperimentReset(expId){
+  S.frDone       = 0;
+  S.objFound     = 0;
+  S.cliLats      = [];
+  S.cliEnergySum = 0;
+  S.cliStart     = Date.now();
+  RES.clientReset();
+  SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
+
+  // Reset UI
+  $('cFrDone').textContent = '0';
+  $('cObjFnd').textContent = '0';
+  $('cAvgLat').textContent = '0ms';
+  $('cEnergy').textContent = '0.000';
+
+  LOG.reset(expId);
+  LOG.event('CLIENT_RESET', { expId: expId });
+  toast('Experiment reset by host');
+}
+
 function refreshServer(){ window.location.reload(); }
 
 function refreshClient(){ window.location.reload(); }
@@ -704,6 +917,7 @@ function _wsReconnectClient(){
       }
       if(msg.type==='error'){ toast(msg.msg||'Reconnect error'); setStatus('c',msg.msg||'Error','r'); }
       if(msg.type==='frame')     handleFrame(msg);
+      if(msg.type==='exp-reset') clientExperimentReset((msg.data && msg.data.expId) || 0);
       if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
     },
     ()=>{
@@ -766,9 +980,12 @@ function onClientJoined(clientId){
   updateFrameDistUI();
   toast('Client '+n+' connected!');
   setStatus('s',Object.keys(S.clients).length+' client(s) connected','g');
+  LOG.event('CLIENT_JOINED', { clientId: clientId, name: 'Client '+n, totalClients: Object.keys(S.clients).length });
 }
 
 function onClientDrop(clientId){
+  const name = (S.clients[clientId] && S.clients[clientId].name) || clientId;
+  LOG.event('CLIENT_LEFT', { clientId: clientId, name: name, framesProcessed: S.clients[clientId] ? Math.floor((S.clients[clientId].frames||0)/4) : 0 });
   delete S.clients[clientId];
   updateCliCount();
   $('cli-'+sid(clientId))?.remove();
@@ -782,12 +999,24 @@ function onClientResult(clientId, msg){
   // use tsMap as primary source, fall back to msg.sched
   const sched = (cli.tsMap && cli.tsMap[msg.ts]) || msg.sched || 'greedy';
   if(cli.tsMap) delete cli.tsMap[msg.ts]; // clean up
-  console.log('[HOST result] sched='+sched+' lat='+lat+' msg.sched='+msg.sched);
+  const frameNum = Math.floor(cli.frames/4) + 1;
   cli.frames++; cli.dets+=dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
   if(!cli.schedLats[sched]) cli.schedLats[sched]=[];
   cli.schedLats[sched].push(lat);
-  console.log('[HOST schedLats]', JSON.stringify({g:cli.schedLats.greedy.length, p:cli.schedLats.pso.length, m:cli.schedLats.mompso.length, mg:cli.schedLats['mompso-ga'].length}));
   S.totalDet+=dets.length; S.lats.push(lat);
+
+  // Per-frame structured log
+  LOG.event('RESULT_OK', {
+    frame:    frameNum,
+    client:   cli.name,
+    sched:    sched,
+    latMs:    lat,
+    dets:     dets.length,
+    pend:     cli.pend,
+    totalFrames: S.sent,
+    ts:       msg.ts
+  });
+
   updateCliCount(); updateClientUI(clientId); renderSrvDets(dets);
   if(dets.length) drawSrvBoxes(dets,msg.fw,msg.fh);
   updateSrvStats();
@@ -932,17 +1161,27 @@ function pickClientForSched(sched){
 function dispatch(jpg,fw,fh){
   const cids=Object.keys(S.clients);
   if(!cids.length) return;
+  const frameIndex = S.sent + 1; // 1-based frame number for this experiment
   const pickedThisFrame = new Set();
   SCHEDS.forEach(sched=>{
     const id = cids.length===1 ? cids[0] : pickClientForSched(sched);
     if(!id) return;
     const ts=Date.now();
     if(S.clients[id]) S.clients[id].tsMap[ts]=sched;
-    console.log('[HOST dispatch] sched='+sched+' to='+id+' ts='+ts);
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
     if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
     pickedThisFrame.add(id);
+    // Per-scheduler dispatch log
+    LOG.event('DISPATCH', {
+      frame:   frameIndex,
+      sched:   sched,
+      to:      (S.clients[id] && S.clients[id].name) || id,
+      toId:    id,
+      w:       fw, h: fh,
+      ts:      ts,
+      pending: (S.clients[id] && S.clients[id].pend) || 1
+    });
   });
   // count unique video frames per client (not per scheduler)
   pickedThisFrame.forEach(id=>{ if(S.clients[id]) S.clients[id].dispatchedFrames++; });
@@ -1025,6 +1264,7 @@ function joinSession(){
         setStatus('c',msg.msg||'Error','r');
       }
       if(msg.type==='frame')     handleFrame(msg);
+      if(msg.type==='exp-reset') clientExperimentReset((msg.data && msg.data.expId) || 0);
       if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
     },
     ()=>{
@@ -1054,21 +1294,34 @@ function sendSchedResults(){
 
 async function handleFrame(data){
   $('cNoVid').style.display='none';
-  if(!data.jpg){ console.warn('[frame] no jpg'); return; }
+  if(!data.jpg){
+    console.warn('[frame] no jpg');
+    LOG.event('FRAME_FAIL', { reason:'no_jpg', sched: data.sched||'?', ts: data.ts||0 });
+    return;
+  }
   const sched = data.sched || 'greedy';
-  console.log('[CLIENT handleFrame] sched='+sched+' ts='+data.ts);
+  const frameNum = Math.floor(S.frDone / 4) + 1;
+  LOG.event('RELAY_FRAME', { frame: frameNum, sched: sched, ts: data.ts, w: data.fw||'?', h: data.fh||'?' });
 
   const img=new Image();
-  img.onerror=()=>{ console.error('[frame] img load failed'); };
+  img.onerror=()=>{
+    console.error('[frame] img load failed');
+    LOG.event('FRAME_FAIL', { frame: frameNum, reason:'img_load_error', sched: sched, ts: data.ts });
+  };
   img.onload=async()=>{
     const cv=$('cliCanvas'); cv.width=img.width; cv.height=img.height;
     const ctx=cv.getContext('2d'); ctx.drawImage(img,0,0);
 
     // ── Object detection ──────────────────────────────────────
     let dets=[];
+    const detectStart = Date.now();
     if(S.model){
-      try{ dets=await S.model.detect(img); }catch(e){ console.error('[detect]',e); }
+      try{ dets=await S.model.detect(img); }catch(e){
+        console.error('[detect]',e);
+        LOG.event('DETECT_ERR', { frame: frameNum, sched: sched, error: String(e).slice(0,80) });
+      }
     }
+    const detectMs = Date.now() - detectStart;
 
     // ── Per-frame metrics ─────────────────────────────────────
     const lat         = Date.now()-data.ts;          // ms
@@ -1081,6 +1334,18 @@ async function handleFrame(data){
     // Overall client counters (for display only)
     S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
     S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
+
+    // Per-frame structured log entry
+    LOG.event('DETECT_DONE', {
+      frame:    frameNum,
+      sched:    sched,
+      latMs:    lat,
+      detectMs: detectMs,
+      dets:     dets.length,
+      classes:  dets.slice(0,4).map(d=>d.class).join(',') || 'none',
+      energyKJ: frameEnergy.toFixed(8),
+      ts:       data.ts
+    });
 
     // Draw boxes
     dets.forEach(d=>{
@@ -1233,7 +1498,9 @@ async function startCamera(){
     const v=$('srvVid'); v.srcObject=S.stream; await v.play();
     $('srvNoVid').style.display='none'; $('liveTag').style.display='flex';
     $('startCamBtn').style.display='none'; $('stopCamBtn').style.display='block'; $('recTogBtn').style.display='flex';
-    setupCv(v,$('srvCanvas')); S.sessStart=Date.now(); startCapture(); toast('Camera live');
+    setupCv(v,$('srvCanvas'));
+    experimentReset(); // reset counters before each new live session
+    S.sessStart=Date.now(); startCapture(); toast('Camera live');
   }catch(e){ toast('Camera: '+e.message); }
 }
 function stopCamera(){
@@ -1314,6 +1581,9 @@ function setFrMax(){
 async function sendUploadFrames(){
   if(!S._vidUrl || !S._vidDuration){ toast('No video loaded'); return; }
   if(!Object.keys(S.clients).length){ toast('No clients connected'); return; }
+
+  // Reset experiment counters before sending a new batch
+  experimentReset();
 
   // Clamp to [1, totalFrames]
   const total = S._vidTotalFrames || 100;
@@ -1475,6 +1745,7 @@ async function sendRecFrames(){
   });
   if(!dur){ toast('Could not read recording duration'); return; }
   $('recReady').innerHTML='<div style="font-size:11px;font-family:var(--mono);color:var(--amb)">Extracting & sending...</div><div class="pwrap" style="margin-top:6px"><div class="pbar b" id="rp" style="width:0%"></div></div>';
+  experimentReset(); // reset before sending recorded frames
   S.sessStart = Date.now();
   let recSent = 0;
   await extractFrames(url, dur, 60,
