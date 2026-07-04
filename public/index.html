@@ -160,6 +160,16 @@ body{color:var(--txt);font-family:var(--disp)}
 .rtbl tr.tot td{color:var(--txt);font-weight:700;border-top:1px solid var(--bord2)}
 .rtbl td.g{color:var(--acc)}.rtbl td.b{color:var(--blue)}.rtbl td.p{color:var(--pur)}.rtbl td.a{color:var(--amb)}.rtbl td.bld{font-weight:700;color:var(--txt)}
 
+/* name prompt overlay */
+.npov{position:fixed;inset:0;background:rgba(7,7,15,.92);backdrop-filter:blur(8px);z-index:10000;display:flex;align-items:center;justify-content:center;padding:20px}
+.npcard{background:var(--surf);border:1px solid var(--bord2);border-radius:var(--r);padding:28px 24px;width:100%;max-width:340px;text-align:center}
+.npcard .ico{font-size:36px;margin-bottom:14px}
+.npcard h2{font-size:18px;font-weight:800;margin-bottom:6px}
+.npcard p{font-size:11px;color:var(--txt2);font-family:var(--mono);line-height:1.5;margin-bottom:18px}
+.npinp{background:var(--bg3);border:1px solid var(--bord2);border-radius:var(--rs);padding:12px 14px;font-family:var(--disp);font-size:15px;font-weight:700;color:var(--txt);width:100%;outline:none;transition:border-color .2s;text-align:center;margin-bottom:14px;-webkit-appearance:none}
+.npinp:focus{border-color:rgba(77,143,255,.5)}
+.npinp::placeholder{color:var(--txt3);font-weight:400}
+
 /* code input */
 .cinp{background:var(--bg3);border:1px solid var(--bord2);border-radius:var(--rs);padding:12px;font-family:var(--mono);font-size:22px;font-weight:700;color:var(--acc);letter-spacing:.2em;width:100%;text-align:center;outline:none;transition:border-color .2s;text-transform:uppercase;-webkit-appearance:none}
 .cinp:focus{border-color:rgba(0,255,136,.4)}
@@ -183,6 +193,18 @@ body{color:var(--txt);font-family:var(--disp)}
 </head>
 <body>
 
+
+<!-- ═══ NAME PROMPT ═══ -->
+<div id="nameOverlay" class="npov" style="display:none">
+  <div class="npcard">
+    <div class="ico">👤</div>
+    <h2>What's your device name?</h2>
+    <p>This name identifies your device in the session.<br>You can change it any time from settings.</p>
+    <input class="npinp" id="nameInp" maxlength="24" placeholder="e.g. Pixel 7 · Lab A" autocomplete="off" spellcheck="false"
+           onkeydown="if(event.key==='Enter') confirmName()">
+    <button class="btn btn-b" onclick="confirmName()">Continue →</button>
+  </div>
+</div>
 
 <!-- ═══ HOME ═══ -->
 <div id="home" class="scr on">
@@ -394,6 +416,7 @@ body{color:var(--txt);font-family:var(--disp)}
     <div class="tb-bk" onclick="goHome()">←</div>
     <div class="tb-ttl">Join Session</div>
     <div class="tb-bk" onclick="refreshClient()" title="Refresh" style="font-size:15px">↺</div>
+    <div class="tb-bk" onclick="changeDeviceName()" title="Change device name" style="font-size:13px">✎</div>
     <div class="dot" id="cDot"></div>
   </div>
   <div class="statusbar"><div class="sbdot" id="cSbDot"></div><span id="cSbTxt">Loading model...</span></div>
@@ -407,6 +430,11 @@ body{color:var(--txt);font-family:var(--disp)}
     <div class="card">
       <div class="lbl">Session Code</div>
       <input class="cinp" id="codeInp" maxlength="6" placeholder="XXXXXX" autocomplete="off" autocorrect="off" spellcheck="false" oninput="this.value=this.value.toUpperCase().replace(/[^A-Z0-9]/g,'')">
+      <div style="font-size:10px;font-family:var(--mono);color:var(--txt2);margin-top:8px;display:flex;align-items:center;gap:6px">
+        <span style="color:var(--txt3)">YOUR NAME</span>
+        <span id="cliNameTag" style="color:var(--blue);font-weight:700"></span>
+        <span style="color:var(--txt3);cursor:pointer" onclick="changeDeviceName()">✎</span>
+      </div>
       <button class="btn btn-b" id="joinBtn" onclick="joinSession()" style="margin-top:10px" disabled>Connect to Session</button>
     </div>
 
@@ -460,74 +488,105 @@ body{color:var(--txt);font-family:var(--disp)}
 var LOG = (function(){
   var _entries = [];
   var _expId   = 0;   // increments each reset
-  var _t0      = Date.now(); // session wall-clock anchor
-
-  // Column widths for aligned text output
-  var _maxType = 20;
+  var _t0      = Date.now(); // wall-clock anchor for relative ms
+  var _totalFrames = 0; // tracked so filename can include frame count
 
   function _ts(){ return Date.now() - _t0; }
+
+  // ISO string: "2026-07-04T14:23:05.123Z"
   function _iso(){ return new Date().toISOString(); }
+
+  // Human wall-clock: "14:23:05.123"
+  function _wallClock(){
+    var d = new Date();
+    var hh = String(d.getHours()).padStart(2,'0');
+    var mm = String(d.getMinutes()).padStart(2,'0');
+    var ss = String(d.getSeconds()).padStart(2,'0');
+    var ms = String(d.getMilliseconds()).padStart(3,'0');
+    return hh+':'+mm+':'+ss+'.'+ms;
+  }
+
   function _pad(s,n){ s=String(s); while(s.length<n) s+=' '; return s; }
 
-  // type   : string  (e.g. 'DISPATCH', 'RESULT_OK', 'DETECT_DONE', 'FRAME_FAIL')
-  // data   : object  (key-value pairs, all serialised as strings)
+  // type : string  (e.g. 'DISPATCH', 'RESULT_OK', 'DETECT_DONE', 'FRAME_FAIL')
+  // data : object  (key-value pairs, all serialised as strings)
   function event(type, data){
+    var wc = _wallClock();
     var entry = {
-      exp:  _expId,
-      absTime: _iso(),
-      relMs:   _ts(),
-      type:    type,
-      data:    data || {}
+      exp:      _expId,
+      wallTime: wc,
+      isoTime:  _iso(),
+      relMs:    _ts(),
+      type:     type,
+      data:     data || {}
     };
     _entries.push(entry);
-    // Mirror to console in a readable line
-    var parts = ['[LOG]'];
-    parts.push('[EXP-'+_expId+']');
-    parts.push('[+'+entry.relMs+'ms]');
-    parts.push(_pad(type, _maxType));
+    // Track total dispatched frames for filename
+    if(type === 'DISPATCH') _totalFrames++;
+
+    // Mirror to console: [14:23:05.123] [EXP-0] [+412ms]  DISPATCH  sched=greedy ...
+    var parts = ['[LOG]', '['+wc+']', '[EXP-'+_expId+']', '[+'+entry.relMs+'ms]',
+                 _pad(type,20)];
     Object.keys(entry.data).forEach(function(k){ parts.push(k+'='+entry.data[k]); });
     console.log(parts.join('  '));
-    // Refresh log panel if visible
     _renderPanel();
   }
 
   function reset(newExpId){
     _expId = (newExpId != null) ? newExpId : (_expId + 1);
     _t0    = Date.now();
+    _totalFrames = 0;
     event('EXP_RESET', { expId: _expId });
   }
 
   function clear(){
     _entries = [];
+    _totalFrames = 0;
     _t0 = Date.now();
     _renderPanel();
   }
 
+  // Download filename: detectnet_log_14-23-05_42frames.txt
+  function _filename(){
+    var d = new Date();
+    var hh = String(d.getHours()).padStart(2,'0');
+    var mm = String(d.getMinutes()).padStart(2,'0');
+    var ss = String(d.getSeconds()).padStart(2,'0');
+    var date = d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+    return 'detectnet_log_'+date+'_'+hh+'-'+mm+'-'+ss+'_'+_totalFrames+'frames.txt';
+  }
+
   function download(){
+    var devName = (typeof S !== 'undefined' && S.deviceName) ? S.deviceName : 'unknown';
     var header = [
       '# DetectNet Pro — Frame Event Log',
-      '# Generated : ' + new Date().toISOString(),
-      '# Columns   : EXP | AbsoluteTime | RelMs | Type | KeyValuePairs',
-      '#',
-      _pad('EXP',4)+' '+_pad('AbsoluteTime',26)+' '+_pad('RelMs',8)+' '+_pad('Type',22)+' Details',
-      '─'.repeat(120)
+      '# Generated  : ' + new Date().toISOString(),
+      '# Device     : ' + devName,
+      '# Total Frames (dispatched): ' + _totalFrames,
+      '# Columns    : EXP | WallTime     | RelMs   | Type                 | KeyValuePairs',
+      '─'.repeat(130)
     ].join('\n');
 
     var lines = _entries.map(function(e){
       var details = Object.keys(e.data).map(function(k){ return k+'='+e.data[k]; }).join('  ');
-      return _pad(e.exp,4)+' '+_pad(e.absTime,26)+' '+_pad(e.relMs+'ms',8)+' '+_pad(e.type,22)+' '+details;
+      return _pad(e.exp,3)+' '
+            +_pad(e.wallTime,14)+' '
+            +_pad('+'+e.relMs+'ms',10)+' '
+            +_pad(e.type,22)+' '
+            +details;
     });
 
     var txt = header + '\n' + lines.join('\n');
     var blob = new Blob([txt], { type:'text/plain' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'detectnet_log_'+new Date().toISOString().replace(/[:.]/g,'-')+'.txt';
+    a.download = _filename();
     a.click();
   }
 
   function getEntries(){ return _entries.slice(); }
   function getExpId(){ return _expId; }
+  function getTotalFrames(){ return _totalFrames; }
 
   // ── In-page log panel renderer ───────────────────────────────
   function _renderPanel(){
@@ -535,45 +594,48 @@ var LOG = (function(){
     if(!el || el.style.display==='none') return;
     var list = document.getElementById('logList');
     if(!list) return;
-    // Show last 200 entries newest-first
     var show = _entries.slice(-200).reverse();
     var TYPE_COLOR = {
-      'DISPATCH':'#00ff88', 'RESULT_OK':'#4d8fff', 'DETECT_DONE':'#aa66ff',
-      'FRAME_FAIL':'#ff4466', 'FRAME_TIMEOUT':'#ffaa00', 'EXP_RESET':'#ffaa00',
+      'DISPATCH':'#00ff88',   'RESULT_OK':'#4d8fff',   'DETECT_DONE':'#aa66ff',
+      'FRAME_FAIL':'#ff4466', 'FRAME_TIMEOUT':'#ffaa00','EXP_RESET':'#ffaa00',
       'CLIENT_JOINED':'#00ff88','CLIENT_LEFT':'#ff4466','HOST_RESET':'#ffaa00',
-      'FRAME_DROP':'#ff4466','RELAY_FRAME':'#4d8fff','DETECT_ERR':'#ff4466',
-      'CLIENT_RESET':'#ffaa00'
+      'FRAME_DROP':'#ff4466', 'RELAY_FRAME':'#4d8fff',  'DETECT_ERR':'#ff4466',
+      'CLIENT_RESET':'#ffaa00','SESSION_START':'#00ff88'
     };
     list.innerHTML = show.map(function(e){
       var col = TYPE_COLOR[e.type] || '#7878a0';
       var dets = Object.keys(e.data).map(function(k){
-        return '<span style="color:var(--txt2)">'+k+'=</span><span style="color:var(--txt)">'+e.data[k]+'</span>';
+        return '<span style="color:var(--txt2)">'+k+'=</span>'
+              +'<span style="color:var(--txt)">'+e.data[k]+'</span>';
       }).join('  ');
-      return '<div style="border-bottom:1px solid var(--bord);padding:4px 0;font-size:10px;font-family:var(--mono);line-height:1.5">'
-        +'<span style="color:var(--txt3)">[EXP-'+e.exp+'] [+'+e.relMs+'ms]</span>  '
-        +'<span style="color:'+col+';font-weight:700">'+e.type+'</span>  '+dets
+      return '<div style="border-bottom:1px solid var(--bord);padding:4px 0;font-size:10px;font-family:var(--mono);line-height:1.6">'
+        +'<span style="color:var(--acc);font-size:9px">'+e.wallTime+'</span>'
+        +'  <span style="color:var(--txt3)">[EXP-'+e.exp+'] [+'+e.relMs+'ms]</span>'
+        +'  <span style="color:'+col+';font-weight:700">'+e.type+'</span>'
+        +'  '+dets
         +'</div>';
     }).join('');
   }
 
   function togglePanel(){
-    var el=document.getElementById('logPanel');
+    var el = document.getElementById('logPanel');
     if(!el) return;
     var vis = el.style.display==='none';
     el.style.display = vis ? 'block' : 'none';
     if(vis) _renderPanel();
-    var btn=document.getElementById('logTogBtn');
+    var btn = document.getElementById('logTogBtn');
     if(btn) btn.textContent = vis ? '▲ Hide Log' : '📋 Event Log';
   }
 
   return {
-    event:       event,
-    reset:       reset,
-    clear:       clear,
-    download:    download,
-    getEntries:  getEntries,
-    getExpId:    getExpId,
-    togglePanel: togglePanel
+    event:          event,
+    reset:          reset,
+    clear:          clear,
+    download:       download,
+    getEntries:     getEntries,
+    getExpId:       getExpId,
+    getTotalFrames: getTotalFrames,
+    togglePanel:    togglePanel
   };
 })();
 
@@ -708,6 +770,8 @@ const S = {
   // per-scheduler tracking on client: { schedName: { lats:[], energySum, frames } }
   schedData:{},
   healthTimer:null,
+  // device identity
+  deviceName: localStorage.getItem('dn_deviceName') || '',
 };
 
 // ── UTILS ─────────────────────────────────────────────────────────
@@ -726,6 +790,43 @@ function setStatus(role,msg,dotClass){
 function goHome(){ cleanup(); show('home'); }
 function goServer(){ S.mode='server'; show('srvScr'); initServer(); }
 function goClient(){ S.mode='client'; show('cliScr'); initClient(); }
+
+// ── Device Name Prompt ────────────────────────────────────────────
+// Shown once on first load, or whenever name is missing.
+// Persisted in localStorage so it survives page reloads.
+function initNamePrompt(){
+  if(S.deviceName){ return; } // already set — skip
+  const ov = $('nameOverlay');
+  const inp = $('nameInp');
+  // Pre-fill with parsed device info as a helpful suggestion
+  inp.placeholder = getDeviceInfo() || 'My Device';
+  ov.style.display = 'flex';
+  // Focus after a short delay (avoids mobile keyboard jumping on load)
+  setTimeout(()=>{ inp.focus(); }, 300);
+}
+
+function confirmName(){
+  const inp = $('nameInp');
+  const val = inp.value.trim();
+  // If blank, fall back to the placeholder (device info)
+  const name = val || inp.placeholder || getDeviceInfo() || 'Device';
+  S.deviceName = name;
+  localStorage.setItem('dn_deviceName', name);
+  $('nameOverlay').style.display = 'none';
+  // Update the name tag visible on the client screen
+  const tag = $('cliNameTag');
+  if(tag) tag.textContent = name;
+  toast('Name set: '+name);
+  LOG.event('SESSION_START', { device: name });
+}
+
+function changeDeviceName(){
+  const cur = S.deviceName || '';
+  const inp = $('nameInp');
+  if(inp) inp.value = cur;
+  const ov = $('nameOverlay');
+  if(ov){ ov.style.display='flex'; setTimeout(()=>inp && inp.focus(), 200); }
+}
 
 function cleanup(){
   clearInterval(S.capTimer); clearInterval(S.healthTimer); clearInterval(S._pingTimer);
@@ -907,7 +1008,7 @@ function _wsReconnectClient(){
   connectWS(
     ()=>{
       startWSPing();
-      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: getDeviceInfo() } });
+      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: S.deviceName || getDeviceInfo() } });
     },
     (msg)=>{
       if(msg.type==='joined'){
@@ -1210,6 +1311,9 @@ async function initClient(){
   RES.clientReset();
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
   startHealthReporting();
+  // Show current device name in the code card
+  const tag = $('cliNameTag');
+  if(tag) tag.textContent = S.deviceName || '';
   await loadModel();
 }
 
@@ -1286,7 +1390,7 @@ function joinSession(){
     ()=>{
       startWSPing();
       requestWakeLock();
-      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: getDeviceInfo() } });
+      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: S.deviceName || getDeviceInfo() } });
     },
     (msg)=>{
       console.log('[Client] msg:', msg.type);
@@ -1856,6 +1960,11 @@ function drawSrvBoxes(dets,fw,fh){
   dets.forEach(d=>{ const[x,y,w,h]=d.bbox; ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.strokeRect(x*sx,y*sy,w*sx,h*sy); const lbl=d.class+' '+Math.round(d.score*100)+'%'; ctx.fillStyle='rgba(0,255,136,.85)'; ctx.fillRect(x*sx,y*sy-18,ctx.measureText(lbl).width+8,18); ctx.fillStyle='#07070f'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x*sx+4,y*sy-5); });
 }
 function clearDets(){ $('sDetList').innerHTML=''; S.totalDet=0; $('sTotDet').textContent='0'; }
+
+// ── App init — runs once on page load ────────────────────────────
+(function initApp(){
+  initNamePrompt();
+})();
 </script>
 </body>
 </html>
