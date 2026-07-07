@@ -491,6 +491,56 @@ var LOG = (function(){
   var _t0      = Date.now(); // wall-clock anchor for relative ms
   var _totalFrames = 0; // tracked so filename can include frame count
 
+  // ── Per-device, per-scheduler stats tracked inside LOG ────────
+  // Keyed by clientId. Populated by LOG.trackDispatch / LOG.trackResult.
+  // _stats[clientId] = {
+  //   name: string,
+  //   dispatched:  { sched: count },   // frames sent to this device per scheduler
+  //   returned:    { sched: count },   // results received back per scheduler
+  //   cpuReadings: number[],           // all CPU% samples received from this device
+  //   cpuAtDispatch: { sched: [] }     // CPU% of the device at each dispatch moment
+  // }
+  var _stats = {};
+  var _SCHEDS = ['greedy','pso','mompso','mompso-ga'];
+  var _SCHED_NAMES = { greedy:'Greedy', pso:'PSO', mompso:'MOMPSO', 'mompso-ga':'MOMPSO-GA' };
+
+  function _ensureDevice(clientId, name){
+    if(!_stats[clientId]){
+      _stats[clientId] = {
+        name: name || clientId,
+        dispatched:    { greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
+        returned:      { greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
+        cpuReadings:   [],
+        cpuAtDispatch: { greedy:[], pso:[], mompso:[], 'mompso-ga':[] }
+      };
+    } else if(name && name !== clientId){
+      _stats[clientId].name = name;
+    }
+  }
+
+  // Called from dispatch() on the HOST when a frame is sent to a device for a scheduler.
+  // cpuLoad = client's last known CPU% (from health data).
+  function trackDispatch(clientId, name, sched, cpuLoad){
+    _ensureDevice(clientId, name);
+    if(_stats[clientId].dispatched[sched] !== undefined)
+      _stats[clientId].dispatched[sched]++;
+    if(_stats[clientId].cpuAtDispatch[sched] && cpuLoad != null)
+      _stats[clientId].cpuAtDispatch[sched].push(cpuLoad);
+  }
+
+  // Called from onClientResult() on the HOST when a result is received from a device.
+  function trackResult(clientId, sched){
+    if(!_stats[clientId]) return;
+    if(_stats[clientId].returned[sched] !== undefined)
+      _stats[clientId].returned[sched]++;
+  }
+
+  // Called from onClientHealth() on the HOST when a health update arrives.
+  function trackCPU(clientId, name, cpuLoad){
+    _ensureDevice(clientId, name);
+    if(cpuLoad != null) _stats[clientId].cpuReadings.push(cpuLoad);
+  }
+
   function _ts(){ return Date.now() - _t0; }
 
   // ISO string: "2026-07-04T14:23:05.123Z"
@@ -507,6 +557,7 @@ var LOG = (function(){
   }
 
   function _pad(s,n){ s=String(s); while(s.length<n) s+=' '; return s; }
+  function _rpad(s,n){ s=String(s); while(s.length<n) s=' '+s; return s; }
 
   // type : string  (e.g. 'DISPATCH', 'RESULT_OK', 'DETECT_DONE', 'FRAME_FAIL')
   // data : object  (key-value pairs, all serialised as strings)
@@ -536,12 +587,14 @@ var LOG = (function(){
     _expId = (newExpId != null) ? newExpId : (_expId + 1);
     _t0    = Date.now();
     _totalFrames = 0;
+    _stats = {};
     event('EXP_RESET', { expId: _expId });
   }
 
   function clear(){
     _entries = [];
     _totalFrames = 0;
+    _stats = {};
     _t0 = Date.now();
     _renderPanel();
   }
@@ -556,13 +609,154 @@ var LOG = (function(){
     return 'detectnet_log_'+date+'_'+hh+'-'+mm+'-'+ss+'_'+_totalFrames+'frames.txt';
   }
 
+  // ── Build the analytics summary block ────────────────────────
+  function _buildSummary(){
+    var sep  = '═'.repeat(130);
+    var sep2 = '─'.repeat(130);
+    var lines = [];
+
+    lines.push(sep);
+    lines.push('  DETECTNET PRO — EXPERIMENT SUMMARY');
+    lines.push('  Generated : ' + new Date().toISOString());
+    lines.push('  Experiment: EXP-' + _expId);
+    lines.push(sep);
+
+    var deviceIds = Object.keys(_stats);
+
+    // ── 1. Total frames sent vs returned (global success rate) ──
+    var totalDispatched = 0, totalReturned = 0;
+    deviceIds.forEach(function(id){
+      _SCHEDS.forEach(function(s){
+        totalDispatched += (_stats[id].dispatched[s]||0);
+        totalReturned   += (_stats[id].returned[s]||0);
+      });
+    });
+    // totalDispatched here counts per-scheduler messages (4 per video frame).
+    // S.sent on the host = unique video frames.  We derive unique frames from
+    // totalDispatched / 4 when 4 schedulers are running.
+    var schedCount = _SCHEDS.length || 4;
+    var uniqueVideoFrames  = Math.round(totalDispatched / schedCount);
+    var uniqueReturnedApprox = Math.round(totalReturned  / schedCount);
+    var globalPct = uniqueVideoFrames > 0
+      ? (uniqueReturnedApprox / uniqueVideoFrames * 100).toFixed(1)
+      : '0.0';
+
+    lines.push('');
+    lines.push('  ┌─ GLOBAL SUCCESS RATE ────────────────────────────────────────');
+    lines.push('  │  Total video frames dispatched : ' + uniqueVideoFrames);
+    lines.push('  │  Total results returned        : ' + uniqueReturnedApprox);
+    lines.push('  │  Overall success rate          : ' + globalPct + '%  (' + uniqueReturnedApprox + '/' + uniqueVideoFrames + ')');
+    lines.push('  └──────────────────────────────────────────────────────────────');
+
+    // ── 2. Per-scheduler success rate ──────────────────────────
+    lines.push('');
+    lines.push('  ┌─ SUCCESS RATE BY SCHEDULER ──────────────────────────────────');
+    lines.push('  │  ' + _pad('Scheduler',14) + _pad('Dispatched',12) + _pad('Returned',12) + _pad('Success%',12) + 'Assessment');
+    lines.push('  │  ' + '─'.repeat(60));
+    _SCHEDS.forEach(function(s){
+      var disp=0, ret=0;
+      deviceIds.forEach(function(id){ disp+=(_stats[id].dispatched[s]||0); ret+=(_stats[id].returned[s]||0); });
+      var pct = disp > 0 ? (ret/disp*100).toFixed(1) : '0.0';
+      var assess = parseFloat(pct) >= 95 ? 'EXCELLENT' : parseFloat(pct) >= 80 ? 'GOOD' : parseFloat(pct) >= 60 ? 'FAIR' : 'POOR';
+      lines.push('  │  ' + _pad(_SCHED_NAMES[s],14) + _pad(disp,12) + _pad(ret,12) + _pad(pct+'%',12) + assess);
+    });
+    lines.push('  └──────────────────────────────────────────────────────────────');
+
+    // ── 3. Per-device frame count + success rate per scheduler ──
+    lines.push('');
+    lines.push('  ┌─ PER-DEVICE STATS ───────────────────────────────────────────');
+    if(!deviceIds.length){
+      lines.push('  │  No device data recorded.');
+    } else {
+      deviceIds.forEach(function(id){
+        var d = _stats[id];
+        var devDisp=0, devRet=0;
+        _SCHEDS.forEach(function(s){ devDisp+=(d.dispatched[s]||0); devRet+=(d.returned[s]||0); });
+        var devPct = devDisp > 0 ? (devRet/devDisp*100).toFixed(1) : '0.0';
+        // unique video frames this device processed ≈ total returned across all scheds / 4
+        var devUniqueFrames = Math.round(devRet / schedCount);
+
+        lines.push('  │');
+        lines.push('  │  Device : ' + d.name);
+        lines.push('  │    Unique frames processed  : ' + devUniqueFrames);
+        lines.push('  │    Total WS frames returned : ' + devRet + ' / ' + devDisp + '  (' + devPct + '% success)');
+
+        // per-scheduler breakdown for this device
+        lines.push('  │    Scheduler breakdown:');
+        lines.push('  │      ' + _pad('Scheduler',14) + _pad('Sent',8) + _pad('Got',8) + _pad('Rate',10) + 'Avg CPU-at-dispatch');
+        lines.push('  │      ' + '─'.repeat(56));
+        _SCHEDS.forEach(function(s){
+          var sd = d.dispatched[s]||0;
+          var sr = d.returned[s]||0;
+          var sp = sd > 0 ? (sr/sd*100).toFixed(1)+'%' : 'N/A';
+          // average CPU% the device reported when this scheduler picked it
+          var cpuArr = d.cpuAtDispatch[s] || [];
+          var cpuAvg = cpuArr.length ? (cpuArr.reduce(function(a,b){return a+b;},0)/cpuArr.length).toFixed(1)+'%' : 'N/A';
+          lines.push('  │      ' + _pad(_SCHED_NAMES[s],14) + _pad(sd,8) + _pad(sr,8) + _pad(sp,10) + cpuAvg);
+        });
+
+        // CPU utilisation for this device
+        var cpuAll = d.cpuReadings;
+        if(cpuAll.length){
+          var cpuMin  = Math.min.apply(null,cpuAll).toFixed(1);
+          var cpuMax  = Math.max.apply(null,cpuAll).toFixed(1);
+          var cpuMean = (cpuAll.reduce(function(a,b){return a+b;},0)/cpuAll.length).toFixed(1);
+          var cpuLast = cpuAll[cpuAll.length-1].toFixed(1);
+          lines.push('  │    CPU utilisation (absolute %, higher = more loaded):');
+          lines.push('  │      Samples : ' + cpuAll.length);
+          lines.push('  │      Min     : ' + cpuMin + '%');
+          lines.push('  │      Max     : ' + cpuMax + '%');
+          lines.push('  │      Mean    : ' + cpuMean + '%');
+          lines.push('  │      Last    : ' + cpuLast + '%');
+          // Derive a simple utilization band
+          var meanF = parseFloat(cpuMean);
+          var band  = meanF < 30 ? 'LOW (idle)' : meanF < 60 ? 'MODERATE' : meanF < 80 ? 'HIGH' : 'CRITICAL';
+          lines.push('  │      Band    : ' + band);
+        } else {
+          lines.push('  │    CPU utilisation : no health data received');
+        }
+      });
+    }
+    lines.push('  └──────────────────────────────────────────────────────────────');
+
+    // ── 4. CPU usage by scheduler (how much CPU each scheduler "consumed") ──
+    lines.push('');
+    lines.push('  ┌─ CPU UTILISATION BY SCHEDULER ───────────────────────────────');
+    lines.push('  │  (Average CPU% of the device that was picked at each dispatch)');
+    lines.push('  │  ' + _pad('Scheduler',14) + _pad('Samples',10) + _pad('AvgCPU%',12) + _pad('MinCPU%',12) + 'MaxCPU%');
+    lines.push('  │  ' + '─'.repeat(60));
+    _SCHEDS.forEach(function(s){
+      var allCpu = [];
+      deviceIds.forEach(function(id){ allCpu = allCpu.concat(_stats[id].cpuAtDispatch[s]||[]); });
+      if(!allCpu.length){
+        lines.push('  │  ' + _pad(_SCHED_NAMES[s],14) + 'no data');
+        return;
+      }
+      var avg = (allCpu.reduce(function(a,b){return a+b;},0)/allCpu.length).toFixed(1);
+      var mn  = Math.min.apply(null,allCpu).toFixed(1);
+      var mx  = Math.max.apply(null,allCpu).toFixed(1);
+      lines.push('  │  ' + _pad(_SCHED_NAMES[s],14) + _pad(allCpu.length,10) + _pad(avg+'%',12) + _pad(mn+'%',12) + mx+'%');
+    });
+    lines.push('  │');
+    lines.push('  │  NOTE: CPU% is measured on the CLIENT device (higher = device is more loaded).');
+    lines.push('  │  A scheduler that consistently picks high-CPU devices is less efficient.');
+    lines.push('  └──────────────────────────────────────────────────────────────');
+
+    lines.push('');
+    lines.push(sep);
+    return lines.join('\n');
+  }
+
   function download(){
     var devName = (typeof S !== 'undefined' && S.deviceName) ? S.deviceName : 'unknown';
+
+    var summaryBlock = _buildSummary();
+
     var header = [
       '# DetectNet Pro — Frame Event Log',
       '# Generated  : ' + new Date().toISOString(),
       '# Device     : ' + devName,
-      '# Total Frames (dispatched): ' + _totalFrames,
+      '# Total Frames (dispatched by LOG): ' + _totalFrames,
       '# Columns    : EXP | WallTime     | RelMs   | Type                 | KeyValuePairs',
       '─'.repeat(130)
     ].join('\n');
@@ -576,7 +770,7 @@ var LOG = (function(){
             +details;
     });
 
-    var txt = header + '\n' + lines.join('\n');
+    var txt = summaryBlock + '\n\n' + header + '\n' + lines.join('\n') + '\n\n' + summaryBlock;
     var blob = new Blob([txt], { type:'text/plain' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -587,6 +781,7 @@ var LOG = (function(){
   function getEntries(){ return _entries.slice(); }
   function getExpId(){ return _expId; }
   function getTotalFrames(){ return _totalFrames; }
+  function getStats(){ return _stats; }
 
   // ── In-page log panel renderer ───────────────────────────────
   function _renderPanel(){
@@ -635,7 +830,11 @@ var LOG = (function(){
     getEntries:     getEntries,
     getExpId:       getExpId,
     getTotalFrames: getTotalFrames,
-    togglePanel:    togglePanel
+    getStats:       getStats,
+    togglePanel:    togglePanel,
+    trackDispatch:  trackDispatch,
+    trackResult:    trackResult,
+    trackCPU:       trackCPU
   };
 })();
 
@@ -1113,6 +1312,9 @@ function onClientResult(clientId, msg){
   cli.schedLats[sched].push(lat);
   S.totalDet+=dets.length; S.lats.push(lat);
 
+  // Track successful return in LOG analytics
+  LOG.trackResult(clientId, sched);
+
   // Per-frame structured log
   LOG.event('RESULT_OK', {
     frame:    frameNum,
@@ -1134,7 +1336,10 @@ function onClientResult(clientId, msg){
 
 function onClientHealth(clientId, h){
   const cli=S.clients[clientId]; if(!cli) return;
-  cli.health={...cli.health,...h}; updateClientUI(clientId);
+  cli.health={...cli.health,...h};
+  // Track absolute CPU reading in LOG analytics
+  if(h && h.cpu != null) LOG.trackCPU(clientId, cli.name, h.cpu);
+  updateClientUI(clientId);
 }
 
 // sched-result from client — ignored, host calculates everything itself
@@ -1275,20 +1480,29 @@ function dispatch(jpg,fw,fh){
     const id = cids.length===1 ? cids[0] : pickClientForSched(sched);
     if(!id) return;
     const ts=Date.now();
-    if(S.clients[id]) S.clients[id].tsMap[ts]=sched;
+    const cli = S.clients[id];
+    if(cli) cli.tsMap[ts]=sched;
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
-    if(S.clients[id]) S.clients[id].pend=(S.clients[id].pend||0)+1;
+    if(cli) cli.pend=(cli.pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
     pickedThisFrame.add(id);
+
+    // Capture the device's current CPU load at the moment of dispatch
+    const cpuNow = (cli && cli.health && cli.health.cpu != null) ? cli.health.cpu : null;
+
+    // Track dispatch in LOG analytics
+    LOG.trackDispatch(id, (cli && cli.name)||id, sched, cpuNow);
+
     // Per-scheduler dispatch log
     LOG.event('DISPATCH', {
       frame:   frameIndex,
       sched:   sched,
-      to:      (S.clients[id] && S.clients[id].name) || id,
+      to:      (cli && cli.name) || id,
       toId:    id,
       w:       fw, h: fh,
       ts:      ts,
-      pending: (S.clients[id] && S.clients[id].pend) || 1
+      pending: (cli && cli.pend) || 1,
+      cpuLoad: cpuNow != null ? cpuNow+'%' : 'N/A'
     });
   });
   // count unique video frames per client (not per scheduler)
