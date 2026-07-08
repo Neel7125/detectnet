@@ -19,6 +19,18 @@ One device acts as the **Host** — it streams a live camera feed, uploads a vid
 ### Transport
 All communication goes through a **WebSocket relay server** (`server.js`) hosted on Railway. No WebRTC or P2P — pure WebSocket, works across any network (4G, different WiFi, different countries).
 
+### Logging & Analytics
+All frames, packets, and energy consumption are logged with Wireshark-style precision:
+- **Frame Event Log**: Tracks every frame lifecycle (dispatch → relay → detect → result)
+- **Network Override**: Full packet capture (TX/RX) with success/fail status for every WebSocket message
+- **Energy (KJ)**: Per-device × per-scheduler energy consumption matrix
+
+Export buttons generate `.txt` reports with complete analytics:
+- Success rates (global, per-scheduler, per-device)
+- CPU utilization patterns (which schedulers picked high-load vs low-load devices)
+- Energy consumption matrix (device × scheduler in Kilojoules)
+- Full packet log (seq#, timestamp, direction, type, bytes, scheduler, device, status)
+
 ### Schedulers
 All four schedulers run **simultaneously** on every frame batch. Each one independently decides which client gets which frame based on device health scores.
 

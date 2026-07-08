@@ -406,6 +406,25 @@ body{color:var(--txt);font-family:var(--disp)}
       </div>
     </div>
 
+    <!-- ── Network Override Panel (packet capture) ── -->
+    <div class="card">
+      <div class="sechd">
+        <span class="sect">Network Override</span>
+        <div style="display:flex;gap:7px">
+          <span class="seca" onclick="NET.download()" title="Export full packet log .txt">⬇ Export Packets</span>
+          <span class="seca" onclick="NET.reset();document.getElementById('netList').innerHTML=''" title="Clear packet log">✕ Clear</span>
+        </div>
+      </div>
+      <div style="font-size:10px;font-family:var(--mono);color:var(--txt2);margin-bottom:8px">All WebSocket packets in this DetectNet cluster — TX/RX, success &amp; failures.</div>
+      <div style="display:flex;gap:7px;margin-bottom:8px;flex-wrap:wrap">
+        <button class="btn btn-gh btn-sm" id="netTogBtn" onclick="NET.togglePanel()">📡 Network Override</button>
+      </div>
+      <div id="netPanel" style="display:none">
+        <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);margin-bottom:5px">Latest 200 packets · newest first · TX=outgoing · RX=incoming</div>
+        <div id="netList" style="max-height:300px;overflow-y:auto;padding-right:4px"></div>
+      </div>
+    </div>
+
     <div style="height:10px"></div>
   </div>
 </div>
@@ -466,6 +485,25 @@ body{color:var(--txt);font-family:var(--disp)}
       <div class="detscr" id="cDetList"></div>
     </div>
 
+    <!-- ── Client Network Override Panel ── -->
+    <div class="card" id="cNetCard" style="display:none">
+      <div class="sechd">
+        <span class="sect">Network Override</span>
+        <div style="display:flex;gap:7px">
+          <span class="seca" onclick="NET.download()" title="Export packet log">⬇ Export</span>
+          <span class="seca" onclick="NET.reset();document.getElementById('cNetList').innerHTML=''" title="Clear">✕</span>
+        </div>
+      </div>
+      <div style="font-size:10px;font-family:var(--mono);color:var(--txt2);margin-bottom:7px">All packets this device sent &amp; received — Wireshark-style.</div>
+      <div style="display:flex;gap:7px;margin-bottom:7px">
+        <button class="btn btn-gh btn-sm" id="cNetTogBtn" onclick="toggleCliNetPanel()">📡 Show Packets</button>
+      </div>
+      <div id="cNetPanel" style="display:none">
+        <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);margin-bottom:4px">Latest 200 packets · TX=sent · RX=received</div>
+        <div id="cNetList" style="max-height:260px;overflow-y:auto;padding-right:4px"></div>
+      </div>
+    </div>
+
     <div style="height:10px"></div>
   </div>
   <div class="strip">
@@ -498,7 +536,8 @@ var LOG = (function(){
   //   dispatched:  { sched: count },   // frames sent to this device per scheduler
   //   returned:    { sched: count },   // results received back per scheduler
   //   cpuReadings: number[],           // all CPU% samples received from this device
-  //   cpuAtDispatch: { sched: [] }     // CPU% of the device at each dispatch moment
+  //   cpuAtDispatch: { sched: [] },    // CPU% of the device at each dispatch moment
+  //   energyKJ:    { sched: number }   // cumulative energy (KJ) per scheduler for this device
   // }
   var _stats = {};
   var _SCHEDS = ['greedy','pso','mompso','mompso-ga'];
@@ -511,7 +550,8 @@ var LOG = (function(){
         dispatched:    { greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
         returned:      { greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
         cpuReadings:   [],
-        cpuAtDispatch: { greedy:[], pso:[], mompso:[], 'mompso-ga':[] }
+        cpuAtDispatch: { greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+        energyKJ:      { greedy:0, pso:0, mompso:0, 'mompso-ga':0 }
       };
     } else if(name && name !== clientId){
       _stats[clientId].name = name;
@@ -539,6 +579,14 @@ var LOG = (function(){
   function trackCPU(clientId, name, cpuLoad){
     _ensureDevice(clientId, name);
     if(cpuLoad != null) _stats[clientId].cpuReadings.push(cpuLoad);
+  }
+
+  // Called from handleFrame() on CLIENT or onClientResult() on HOST with per-frame energy (KJ).
+  // deviceId = S.myId (client) or clientId (host); name = device name; sched = scheduler name.
+  function trackEnergy(deviceId, name, sched, energyKJ){
+    _ensureDevice(deviceId, name);
+    if(_stats[deviceId].energyKJ && sched in _stats[deviceId].energyKJ)
+      _stats[deviceId].energyKJ[sched] += energyKJ;
   }
 
   function _ts(){ return Date.now() - _t0; }
@@ -742,6 +790,37 @@ var LOG = (function(){
     lines.push('  │  A scheduler that consistently picks high-CPU devices is less efficient.');
     lines.push('  └──────────────────────────────────────────────────────────────');
 
+    // ── 5. Energy consumption by device and scheduler (KJ) ──────
+    lines.push('');
+    lines.push('  ┌─ ENERGY CONSUMPTION (KJ) — PER DEVICE × SCHEDULER ──────────');
+    lines.push('  │  (Energy ≈ POWER_W × latency_s / 1000 · per frame processed)');
+    lines.push('  │  ' + _pad('Device',22) + _SCHEDS.map(function(s){ return _pad(_SCHED_NAMES[s],16); }).join('') + _pad('TOTAL',14));
+    lines.push('  │  ' + '─'.repeat(100));
+    if(!deviceIds.length){
+      lines.push('  │  No energy data recorded.');
+    } else {
+      var schedTotals = { greedy:0, pso:0, mompso:0, 'mompso-ga':0 };
+      deviceIds.forEach(function(id){
+        var d = _stats[id];
+        var rowTotal = 0;
+        var cols = _SCHEDS.map(function(s){
+          var e = (d.energyKJ && d.energyKJ[s]) ? d.energyKJ[s] : 0;
+          rowTotal += e;
+          schedTotals[s] = (schedTotals[s]||0) + e;
+          return _pad(e.toFixed(6)+' KJ', 16);
+        }).join('');
+        lines.push('  │  ' + _pad(d.name,22) + cols + _pad(rowTotal.toFixed(6)+' KJ',14));
+      });
+      lines.push('  │  ' + '─'.repeat(100));
+      var grandTotal = 0;
+      var totCols = _SCHEDS.map(function(s){
+        var e = schedTotals[s]||0; grandTotal += e;
+        return _pad(e.toFixed(6)+' KJ', 16);
+      }).join('');
+      lines.push('  │  ' + _pad('TOTAL (all devices)',22) + totCols + _pad(grandTotal.toFixed(6)+' KJ',14));
+    }
+    lines.push('  └──────────────────────────────────────────────────────────────');
+
     lines.push('');
     lines.push(sep);
     return lines.join('\n');
@@ -751,6 +830,31 @@ var LOG = (function(){
     var devName = (typeof S !== 'undefined' && S.deviceName) ? S.deviceName : 'unknown';
 
     var summaryBlock = _buildSummary();
+
+    // Build network override summary block from NET module
+    var netSummary = '';
+    if(typeof NET !== 'undefined'){
+      var pkts = NET.getPackets();
+      if(pkts.length){
+        var nsep = '─'.repeat(130);
+        var nLines = [];
+        nLines.push(nsep);
+        nLines.push('  NETWORK OVERRIDE — PACKET CAPTURE SUMMARY  (' + pkts.length + ' packets)');
+        nLines.push(nsep);
+        var txOk=0,txFail=0,rxOk=0,rxFail=0,txB=0,rxB=0;
+        var tc={};
+        pkts.forEach(function(p){
+          if(p.dir==='TX'){ if(p.status==='SENT'||p.status==='OK') txOk++; else txFail++; txB+=p.bytes; }
+          else             { if(p.status==='RECV'||p.status==='OK') rxOk++; else rxFail++; rxB+=p.bytes; }
+          tc[p.type]=(tc[p.type]||0)+1;
+        });
+        nLines.push('  TX sent OK/FAIL: '+txOk+' / '+txFail+'  ('+txB+' bytes)');
+        nLines.push('  RX recv OK/FAIL: '+rxOk+' / '+rxFail+'  ('+rxB+' bytes)');
+        nLines.push('  Type summary: '+Object.keys(tc).sort().map(function(t){ return t+'×'+tc[t]; }).join('  '));
+        nLines.push('  (For full packet table, export via "⬇ Export Packets" button)');
+        netSummary = '\n' + nLines.join('\n') + '\n';
+      }
+    }
 
     var header = [
       '# DetectNet Pro — Frame Event Log',
@@ -770,7 +874,7 @@ var LOG = (function(){
             +details;
     });
 
-    var txt = summaryBlock + '\n\n' + header + '\n' + lines.join('\n') + '\n\n' + summaryBlock;
+    var txt = summaryBlock + netSummary + '\n\n' + header + '\n' + lines.join('\n') + '\n\n' + summaryBlock;
     var blob = new Blob([txt], { type:'text/plain' });
     var a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
@@ -834,7 +938,219 @@ var LOG = (function(){
     togglePanel:    togglePanel,
     trackDispatch:  trackDispatch,
     trackResult:    trackResult,
-    trackCPU:       trackCPU
+    trackCPU:       trackCPU,
+    trackEnergy:    trackEnergy
+  };
+})();
+
+// ══════════════════════════════════════════════════════════════════
+//  NET module — Wireshark-style full packet capture log
+//  Logs every WebSocket packet in/out with timestamp, direction,
+//  type, payload size, scheduler, device, and success/fail status.
+//  NET.logPacket(dir, type, bytes, sched, device, status, extra)
+//  NET.download()  — exports as .txt
+//  NET.getPackets() — returns packet array
+// ══════════════════════════════════════════════════════════════════
+var NET = (function(){
+  var _packets = [];
+  var _t0 = Date.now();
+  var _seq = 0;
+
+  function _wallClock(){
+    var d = new Date();
+    return String(d.getHours()).padStart(2,'0')+':'+
+           String(d.getMinutes()).padStart(2,'0')+':'+
+           String(d.getSeconds()).padStart(2,'0')+'.'+
+           String(d.getMilliseconds()).padStart(3,'0');
+  }
+  function _pad(s,n){ s=String(s); while(s.length<n) s+=' '; return s; }
+  function _rpad(s,n){ s=String(s); while(s.length<n) s=' '+s; return s; }
+
+  // direction: 'TX' (outgoing) | 'RX' (incoming)
+  // type: WS message type string e.g. 'frame', 'result', 'health', 'ping'
+  // bytes: payload size in bytes (approximate from JSON.stringify length)
+  // sched: scheduler name or '' if N/A
+  // device: device name or clientId
+  // status: 'OK' | 'FAIL' | 'DROP' | 'TIMEOUT'
+  // extra: any additional key=value string
+  function logPacket(dir, type, bytes, sched, device, status, extra){
+    _seq++;
+    var pkt = {
+      seq:      _seq,
+      wallTime: _wallClock(),
+      relMs:    Date.now() - _t0,
+      dir:      dir,
+      type:     type,
+      bytes:    bytes || 0,
+      sched:    sched || '',
+      device:   device || '',
+      status:   status || 'OK',
+      extra:    extra || ''
+    };
+    _packets.push(pkt);
+    _renderNetPanel();
+  }
+
+  function reset(){
+    _packets = [];
+    _seq = 0;
+    _t0 = Date.now();
+    _renderNetPanel();
+  }
+
+  function getPackets(){ return _packets.slice(); }
+
+  // ── Download the full packet capture ─────────────────────────
+  function download(){
+    var sep  = '═'.repeat(140);
+    var sep2 = '─'.repeat(140);
+    var devName = (typeof S !== 'undefined' && S.deviceName) ? S.deviceName : 'unknown';
+    var now  = new Date();
+    var ts   = now.getFullYear()+'-'+String(now.getMonth()+1).padStart(2,'0')+'-'+String(now.getDate()).padStart(2,'0')
+              +'_'+String(now.getHours()).padStart(2,'0')+'-'+String(now.getMinutes()).padStart(2,'0')+'-'+String(now.getSeconds()).padStart(2,'0');
+    var fname = 'detectnet_network_'+ts+'_'+_packets.length+'pkts.txt';
+
+    var lines = [];
+    lines.push(sep);
+    lines.push('  DETECTNET PRO — NETWORK OVERRIDE / FULL PACKET CAPTURE');
+    lines.push('  Generated : ' + now.toISOString());
+    lines.push('  Device    : ' + devName);
+    lines.push('  Packets   : ' + _packets.length);
+    lines.push('  Cluster   : DetectNet WebSocket Relay Network');
+    lines.push(sep);
+    lines.push('');
+
+    // ── Global packet stats ───────────────────────────────────
+    var txOk=0, txFail=0, rxOk=0, rxFail=0, dropCount=0;
+    var txBytes=0, rxBytes=0;
+    var typeCount = {};
+    _packets.forEach(function(p){
+      if(p.dir==='TX'){ if(p.status==='OK'||p.status==='SENT') txOk++; else txFail++; txBytes+=p.bytes; }
+      else             { if(p.status==='OK'||p.status==='RECV') rxOk++; else rxFail++; rxBytes+=p.bytes; }
+      if(p.status==='DROP') dropCount++;
+      typeCount[p.type] = (typeCount[p.type]||0)+1;
+    });
+    var totalPkts = _packets.length;
+    var lostPkts  = txFail + rxFail + dropCount;
+    var successPct = totalPkts > 0 ? ((totalPkts-lostPkts)/totalPkts*100).toFixed(1) : '0.0';
+
+    lines.push('  ┌─ PACKET STATISTICS ──────────────────────────────────────────────────────────');
+    lines.push('  │  Total packets captured  : ' + totalPkts);
+    lines.push('  │  TX (sent)    OK/FAIL    : ' + txOk + ' / ' + txFail + '  (' + txBytes + ' bytes)');
+    lines.push('  │  RX (recv)    OK/FAIL    : ' + rxOk + ' / ' + rxFail + '  (' + rxBytes + ' bytes)');
+    lines.push('  │  Dropped / Lost          : ' + lostPkts);
+    lines.push('  │  Success Rate            : ' + successPct + '%');
+    lines.push('  │');
+    lines.push('  │  Packet type breakdown:');
+    Object.keys(typeCount).sort().forEach(function(t){
+      lines.push('  │    ' + _pad(t,22) + typeCount[t] + ' pkts');
+    });
+    lines.push('  └──────────────────────────────────────────────────────────────────────────────');
+    lines.push('');
+
+    // ── Per-scheduler packet stats ────────────────────────────
+    var schedPkts = {};
+    ['greedy','pso','mompso','mompso-ga'].forEach(function(s){ schedPkts[s]={tx:0,rx:0,fail:0,bytes:0}; });
+    _packets.forEach(function(p){
+      if(!p.sched || !schedPkts[p.sched]) return;
+      if(p.dir==='TX') schedPkts[p.sched].tx++;
+      else             schedPkts[p.sched].rx++;
+      if(p.status==='FAIL'||p.status==='DROP') schedPkts[p.sched].fail++;
+      schedPkts[p.sched].bytes += p.bytes;
+    });
+    lines.push('  ┌─ PACKETS BY SCHEDULER ───────────────────────────────────────────────────────');
+    lines.push('  │  ' + _pad('Scheduler',14) + _pad('TX',8) + _pad('RX',8) + _pad('FAIL/DROP',12) + _pad('Bytes',12) + 'Success%');
+    lines.push('  │  ' + '─'.repeat(66));
+    ['greedy','pso','mompso','mompso-ga'].forEach(function(s){
+      var sp = schedPkts[s];
+      var tot = sp.tx + sp.rx;
+      var pct = tot > 0 ? ((tot-sp.fail)/tot*100).toFixed(1)+'%' : 'N/A';
+      var NAMES = {greedy:'Greedy',pso:'PSO',mompso:'MOMPSO','mompso-ga':'MOMPSO-GA'};
+      lines.push('  │  ' + _pad(NAMES[s],14) + _pad(sp.tx,8) + _pad(sp.rx,8) + _pad(sp.fail,12) + _pad(sp.bytes,12) + pct);
+    });
+    lines.push('  └──────────────────────────────────────────────────────────────────────────────');
+    lines.push('');
+
+    // ── Full packet table ─────────────────────────────────────
+    lines.push('  ┌─ FULL PACKET LOG (Wireshark-style) ─────────────────────────────────────────');
+    lines.push('  │  ' + _pad('No.',6) + _pad('Time',15) + _pad('+ms',9) +
+               _pad('DIR',5) + _pad('Type',22) + _pad('Bytes',8) +
+               _pad('Sched',14) + _pad('Device',22) + _pad('Status',10) + 'Extra');
+    lines.push('  │  ' + '─'.repeat(126));
+    _packets.forEach(function(p){
+      var statusCol = p.status==='OK'||p.status==='SENT'||p.status==='RECV' ? p.status
+                    : p.status==='DROP' ? 'DROP !'
+                    : p.status==='FAIL' ? 'FAIL !'
+                    : p.status==='TIMEOUT' ? 'TIMEOUT!' : p.status;
+      lines.push('  │  '
+        + _pad(p.seq, 6)
+        + _pad(p.wallTime, 15)
+        + _pad('+'+p.relMs+'ms', 9)
+        + _pad(p.dir, 5)
+        + _pad(p.type, 22)
+        + _pad(p.bytes+'B', 8)
+        + _pad(p.sched||'-', 14)
+        + _pad((p.device||'-').slice(0,20), 22)
+        + _pad(statusCol, 10)
+        + (p.extra || '')
+      );
+    });
+    lines.push('  └──────────────────────────────────────────────────────────────────────────────');
+
+    var txt = lines.join('\n') + '\n';
+    var blob = new Blob([txt], { type:'text/plain' });
+    var a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = fname;
+    a.click();
+  }
+
+  // ── In-page net panel renderer ────────────────────────────────
+  function _renderNetPanel(){
+    var show = _packets.slice(-200).reverse();
+    var DIR_COLOR  = { TX:'#4d8fff', RX:'#00ff88' };
+    var STAT_COLOR = { OK:'#00ff88', SENT:'#4d8fff', RECV:'#00ff88', DROP:'#ff4466', FAIL:'#ff4466', TIMEOUT:'#ffaa00' };
+    var html = show.map(function(p){
+      var dc = DIR_COLOR[p.dir]  || '#7878a0';
+      var sc = STAT_COLOR[p.status] || '#7878a0';
+      return '<div style="border-bottom:1px solid var(--bord);padding:3px 0;font-size:9.5px;font-family:var(--mono);line-height:1.55">'
+        +'<span style="color:var(--acc);font-size:9px">'+p.wallTime+'</span>'
+        +'  <span style="color:var(--txt3)">[#'+p.seq+'] [+'+p.relMs+'ms]</span>'
+        +'  <span style="color:'+dc+';font-weight:700">'+p.dir+'</span>'
+        +'  <span style="color:var(--txt);font-weight:700">'+p.type+'</span>'
+        +(p.sched ? '  <span style="color:var(--pur)">'+p.sched+'</span>' : '')
+        +(p.device ? '  <span style="color:var(--txt2)">→'+p.device+'</span>' : '')
+        +'  <span style="color:var(--txt3)">'+p.bytes+'B</span>'
+        +'  <span style="color:'+sc+';font-weight:700">'+p.status+'</span>'
+        +(p.extra ? '  <span style="color:var(--txt3)">'+p.extra+'</span>' : '')
+        +'</div>';
+    }).join('');
+    // Render to server panel if visible
+    var el1 = document.getElementById('netPanel');
+    var list1 = document.getElementById('netList');
+    if(el1 && el1.style.display!=='none' && list1) list1.innerHTML = html;
+    // Render to client panel if visible
+    var el2 = document.getElementById('cNetPanel');
+    var list2 = document.getElementById('cNetList');
+    if(el2 && el2.style.display!=='none' && list2) list2.innerHTML = html;
+  }
+
+  function togglePanel(){
+    var el = document.getElementById('netPanel');
+    if(!el) return;
+    var vis = el.style.display==='none';
+    el.style.display = vis ? 'block' : 'none';
+    if(vis) _renderNetPanel();
+    var btn = document.getElementById('netTogBtn');
+    if(btn) btn.textContent = vis ? '▲ Hide Network' : '📡 Network Override';
+  }
+
+  return {
+    logPacket:    logPacket,
+    reset:        reset,
+    getPackets:   getPackets,
+    download:     download,
+    togglePanel:  togglePanel
   };
 })();
 
@@ -1050,6 +1366,7 @@ function cleanup(){
 function experimentReset(){
   const prevExp = LOG.getExpId();
   LOG.reset(); // increments expId, logs EXP_RESET
+  NET.reset(); // reset network packet log
 
   // ── Reset host-side counters ──────────────────────────────
   S.sent      = 0;
@@ -1121,7 +1438,22 @@ function stopStream(){ if(S.stream){ S.stream.getTracks().forEach(t=>t.stop()); 
 // ── WebSocket ─────────────────────────────────────────────────────
 function wsSend(obj){
   if(S.ws && S.ws.readyState===WebSocket.OPEN){
-    try{ S.ws.send(JSON.stringify(obj)); }catch(e){}
+    try{
+      var raw = JSON.stringify(obj);
+      S.ws.send(raw);
+      // Log every outgoing packet (Wireshark-style)
+      var d = obj.data || {};
+      var sched  = d.sched || obj.sched || '';
+      var device = (d.to && S.clients && S.clients[d.to] && S.clients[d.to].name) || d.to || '';
+      var extra  = '';
+      if(obj.type==='frame')    extra = 'fw='+d.fw+' fh='+d.fh+' ts='+d.ts;
+      if(obj.type==='result')   extra = 'dets='+(d.dets?d.dets.length:0)+' ts='+d.ts;
+      if(obj.type==='health')   extra = 'cpu='+(d.h&&d.h.cpu!=null?d.h.cpu:'?')+'%';
+      if(obj.type==='exp-reset')extra = 'expId='+(d.expId||'?');
+      NET.logPacket('TX', obj.type, raw.length, sched, device, 'SENT', extra);
+    }catch(e){
+      NET.logPacket('TX', (obj&&obj.type)||'unknown', 0, '', '', 'FAIL', 'err='+String(e).slice(0,60));
+    }
   }
 }
 function connectWS(onOpen, onMsg, onClose){
@@ -1131,10 +1463,23 @@ function connectWS(onOpen, onMsg, onClose){
   ws.onmessage = ev=>{
     let msg;
     try{ msg=JSON.parse(ev.data); }catch(e){ console.error('[WS] bad json',e); return; }
+    // Log every incoming packet
+    const d   = msg.data || {};
+    const sched  = d.sched || msg.sched || '';
+    const device = msg.from ? ((S.clients && S.clients[msg.from] && S.clients[msg.from].name) || msg.from) : '';
+    let extra = '';
+    if(msg.type==='frame')       extra = 'fw='+(msg.fw||d.fw||'?')+' ts='+(msg.ts||d.ts||'?');
+    if(msg.type==='result')      extra = 'dets='+((msg.dets||[]).length)+' ts='+(msg.ts||'?');
+    if(msg.type==='health')      extra = 'cpu='+((msg.h&&msg.h.cpu!=null)?msg.h.cpu:'?')+'%';
+    if(msg.type==='client-joined') extra = 'ip='+(msg.ip||'?');
+    if(msg.type==='error')       extra = 'msg='+(msg.msg||'?');
+    const rxBytes = ev.data ? ev.data.length : 0;
+    const status  = msg.type==='error' ? 'FAIL' : 'RECV';
+    NET.logPacket('RX', msg.type, rxBytes, sched, device, status, extra);
     try{ onMsg(msg); }catch(e){ console.error('[WS] onMsg error',e); }
   };
-  ws.onclose   = ()=>{ console.log('[WS] closed'); onClose(); };
-  ws.onerror   = e =>{ console.error('[WS] error',e); };
+  ws.onclose   = ()=>{ console.log('[WS] closed'); NET.logPacket('RX','ws-close',0,'','','DROP','connection_closed'); onClose(); };
+  ws.onerror   = e =>{ console.error('[WS] error',e); NET.logPacket('TX','ws-error',0,'','','FAIL','WS connection error'); };
   return ws;
 }
 function startWSPing(){
@@ -1615,6 +1960,7 @@ function joinSession(){
         $('cVidSec').style.display='block';
         $('cStatSec').style.display='block';
         $('cDetSec').style.display='block';
+        $('cNetCard').style.display='block';
         S.cliStart=Date.now(); S.cliEnergySum=0;
         setStatus('c','Connected — receiving frames','g');
         toast('Connected! Waiting for frames...');
@@ -1691,6 +2037,9 @@ async function handleFrame(data){
 
     // Accumulate into per-scheduler buckets (via RES module)
     RES.clientFrame(sched, lat, frameEnergy);
+
+    // Track energy in LOG analytics (for export summary)
+    LOG.trackEnergy(S.myId, S.deviceName || getDeviceInfo(), sched, frameEnergy);
 
     // Overall client counters (for display only)
     S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
@@ -2174,6 +2523,23 @@ function drawSrvBoxes(dets,fw,fh){
   dets.forEach(d=>{ const[x,y,w,h]=d.bbox; ctx.strokeStyle='#00ff88'; ctx.lineWidth=2; ctx.strokeRect(x*sx,y*sy,w*sx,h*sy); const lbl=d.class+' '+Math.round(d.score*100)+'%'; ctx.fillStyle='rgba(0,255,136,.85)'; ctx.fillRect(x*sx,y*sy-18,ctx.measureText(lbl).width+8,18); ctx.fillStyle='#07070f'; ctx.font='bold 11px monospace'; ctx.fillText(lbl,x*sx+4,y*sy-5); });
 }
 function clearDets(){ $('sDetList').innerHTML=''; S.totalDet=0; $('sTotDet').textContent='0'; }
+
+// ── Client Net Panel toggle ───────────────────────────────────────
+function toggleCliNetPanel(){
+  var el = $('cNetPanel');
+  if(!el) return;
+  var vis = el.style.display==='none';
+  el.style.display = vis ? 'block' : 'none';
+  if(vis){
+    // mirror NET panel render for the client-side list
+    var list = $('cNetList');
+    var src  = $('netList');
+    if(list && src) list.innerHTML = src.innerHTML;
+    else if(list){ NET.togglePanel(); }
+  }
+  var btn = $('cNetTogBtn');
+  if(btn) btn.textContent = vis ? '▲ Hide Packets' : '📡 Show Packets';
+}
 
 // ── App init — runs once on page load ────────────────────────────
 (function initApp(){
