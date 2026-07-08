@@ -988,7 +988,14 @@ var NET = (function(){
       extra:    extra || ''
     };
     _packets.push(pkt);
-    _renderNetPanel();
+    // Cap at 2000 entries to avoid memory bloat in long sessions
+    if(_packets.length > 2000) _packets.splice(0, _packets.length - 2000);
+    // Only re-render the panel if it's currently visible (avoid DOM thrashing on every frame)
+    var panel1 = document.getElementById('netPanel');
+    var panel2 = document.getElementById('cNetPanel');
+    if((panel1 && panel1.style.display !== 'none') || (panel2 && panel2.style.display !== 'none')){
+      _renderNetPanel();
+    }
   }
 
   function reset(){
@@ -1441,7 +1448,9 @@ function wsSend(obj){
     try{
       var raw = JSON.stringify(obj);
       S.ws.send(raw);
-      // Log every outgoing packet (Wireshark-style)
+    }catch(e){ return; }
+    // Log the outgoing packet — in a separate try so logging never blocks sends
+    try{
       var d = obj.data || {};
       var sched  = d.sched || obj.sched || '';
       var device = (d.to && S.clients && S.clients[d.to] && S.clients[d.to].name) || d.to || '';
@@ -1450,10 +1459,9 @@ function wsSend(obj){
       if(obj.type==='result')   extra = 'dets='+(d.dets?d.dets.length:0)+' ts='+d.ts;
       if(obj.type==='health')   extra = 'cpu='+(d.h&&d.h.cpu!=null?d.h.cpu:'?')+'%';
       if(obj.type==='exp-reset')extra = 'expId='+(d.expId||'?');
-      NET.logPacket('TX', obj.type, raw.length, sched, device, 'SENT', extra);
-    }catch(e){
-      NET.logPacket('TX', (obj&&obj.type)||'unknown', 0, '', '', 'FAIL', 'err='+String(e).slice(0,60));
-    }
+      var byteLen = raw ? raw.length : 0;
+      NET.logPacket('TX', obj.type, byteLen, sched, device, 'SENT', extra);
+    }catch(e){ /* logging must never crash the app */ }
   }
 }
 function connectWS(onOpen, onMsg, onClose){
@@ -1463,23 +1471,26 @@ function connectWS(onOpen, onMsg, onClose){
   ws.onmessage = ev=>{
     let msg;
     try{ msg=JSON.parse(ev.data); }catch(e){ console.error('[WS] bad json',e); return; }
-    // Log every incoming packet
-    const d   = msg.data || {};
-    const sched  = d.sched || msg.sched || '';
-    const device = msg.from ? ((S.clients && S.clients[msg.from] && S.clients[msg.from].name) || msg.from) : '';
-    let extra = '';
-    if(msg.type==='frame')       extra = 'fw='+(msg.fw||d.fw||'?')+' ts='+(msg.ts||d.ts||'?');
-    if(msg.type==='result')      extra = 'dets='+((msg.dets||[]).length)+' ts='+(msg.ts||'?');
-    if(msg.type==='health')      extra = 'cpu='+((msg.h&&msg.h.cpu!=null)?msg.h.cpu:'?')+'%';
-    if(msg.type==='client-joined') extra = 'ip='+(msg.ip||'?');
-    if(msg.type==='error')       extra = 'msg='+(msg.msg||'?');
-    const rxBytes = ev.data ? ev.data.length : 0;
-    const status  = msg.type==='error' ? 'FAIL' : 'RECV';
-    NET.logPacket('RX', msg.type, rxBytes, sched, device, status, extra);
+    // Process the message FIRST — logging must never block delivery
     try{ onMsg(msg); }catch(e){ console.error('[WS] onMsg error',e); }
+    // Then log the incoming packet
+    try{
+      const d   = msg.data || {};
+      const sched  = d.sched || msg.sched || '';
+      const device = msg.from ? ((S.clients && S.clients[msg.from] && S.clients[msg.from].name) || msg.from) : '';
+      let extra = '';
+      if(msg.type==='frame')         extra = 'fw='+(msg.fw||d.fw||'?')+' ts='+(msg.ts||d.ts||'?');
+      if(msg.type==='result')        extra = 'dets='+((msg.dets||[]).length)+' ts='+(msg.ts||'?');
+      if(msg.type==='health')        extra = 'cpu='+((msg.h&&msg.h.cpu!=null)?msg.h.cpu:'?')+'%';
+      if(msg.type==='client-joined') extra = 'ip='+(msg.ip||'?');
+      if(msg.type==='error')         extra = 'msg='+(msg.msg||'?');
+      const rxBytes = ev.data ? ev.data.length : 0;
+      const status  = msg.type==='error' ? 'FAIL' : 'RECV';
+      NET.logPacket('RX', msg.type, rxBytes, sched, device, status, extra);
+    }catch(e){ /* logging must never crash the app */ }
   };
-  ws.onclose   = ()=>{ console.log('[WS] closed'); NET.logPacket('RX','ws-close',0,'','','DROP','connection_closed'); onClose(); };
-  ws.onerror   = e =>{ console.error('[WS] error',e); NET.logPacket('TX','ws-error',0,'','','FAIL','WS connection error'); };
+  ws.onclose   = ()=>{ console.log('[WS] closed'); try{ NET.logPacket('RX','ws-close',0,'','','DROP','connection_closed'); }catch(e){} onClose(); };
+  ws.onerror   = e =>{ console.error('[WS] error',e); try{ NET.logPacket('TX','ws-error',0,'','','FAIL','WS connection error'); }catch(e2){} };
   return ws;
 }
 function startWSPing(){
