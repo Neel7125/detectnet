@@ -1711,6 +1711,11 @@ function onClientResult(clientId, msg){
   // Track successful return in LOG analytics
   LOG.trackResult(clientId, sched);
 
+  // Track energy on the HOST side (same formula as the client: POWER_W × latency_s / 1000)
+  // This is what populates the energy table in the exported summary.
+  const frameEnergy = (POWER_W * (lat / 1000)) / 1000; // KJ
+  LOG.trackEnergy(clientId, cli.name, sched, frameEnergy);
+
   // Per-frame structured log
   LOG.event('RESULT_OK', {
     frame:    frameNum,
