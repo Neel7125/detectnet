@@ -1672,10 +1672,16 @@ function initServer(){
 }
 
 function onClientJoined(clientId, ip, deviceInfo){
+  // Guard: if this is a host-reconnect re-announcement (deviceInfo='(reconnected)')
+  // and the client is already tracked, just silently refresh the WS reference — no UI change.
+  if(deviceInfo === '(reconnected)' && S.clients[clientId]){
+    return; // client already in state, nothing to do
+  }
+
   const n = Object.keys(S.clients).length+1;
   // Build display name: device info + IP if available, else fallback to "Client N"
   const ipTag  = ip       ? ' ['+ip+']'       : '';
-  const devTag = deviceInfo ? deviceInfo       : ('Client '+n);
+  const devTag = (deviceInfo && deviceInfo !== '(reconnected)') ? deviceInfo : ('Client '+n);
   const name   = devTag + ipTag;
   const short  = ip ? ip.split('.').pop() : String(n); // avatar text: last IP octet or number
 

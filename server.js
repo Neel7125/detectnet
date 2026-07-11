@@ -13,8 +13,12 @@ import { createServer } from 'http';
 const PORT = process.env.PORT || 3001;
 
 // ── Session store ─────────────────────────────────────────────
-// sessions[code] = { hostWs, clients: Map<clientId, ws>, stats: {...} }
+// sessions[code] = { hostWs, hostId, clients: Map<clientId, ws>, stats, _destroyTimer }
 const sessions = new Map();
+
+// Grace period (ms) before a session is destroyed after the host disconnects.
+// This lets the host reconnect and reclaim the session without clients losing it.
+const HOST_GRACE_MS = 30_000;
 
 // ── Structured logger ─────────────────────────────────────────
 // Every line: ISO_TIMESTAMP  [ROLE/code]  EVENT  key=value ...
@@ -48,6 +52,22 @@ function broadcast(session, obj, excludeWs = null) {
   }
 }
 
+// Destroy a session for real — notify all clients and remove from map.
+function destroySession(code) {
+  const session = sessions.get(code);
+  if (!session) return;
+  clearTimeout(session._destroyTimer);
+  for (const cws of session.clients.values()) send(cws, { type: 'host-left' });
+  log('HOST', code, 'SESSION_DESTROYED', {
+    hostId:          session.hostId,
+    framesSent:      session.stats ? session.stats.framesSent : '?',
+    resultsReceived: session.stats ? session.stats.resultsReceived : '?',
+    expResets:       session.stats ? session.stats.expResets : '?',
+    uptimeSec:       session.stats ? Math.round((Date.now() - session.stats.createdAt) / 1000) : '?'
+  });
+  sessions.delete(code);
+}
+
 wss.on('connection', (ws) => {
   ws._id = null;
   ws._code = null;
@@ -62,19 +82,39 @@ wss.on('connection', (ws) => {
 
     const { type, code, clientId, data } = msg;
 
-    // ── HOST: create session ──────────────────────────────────
+    // ── HOST: create or reclaim session ──────────────────────
     if (type === 'host-create') {
       ws._id = clientId;
       ws._code = code;
       ws._role = 'host';
-      sessions.set(code, {
-        hostWs: ws,
-        hostId: clientId,
-        clients: new Map(),
-        stats: { framesSent: 0, resultsReceived: 0, expResets: 0, createdAt: Date.now() }
-      });
-      send(ws, { type: 'host-ready', code });
-      log('HOST', code, 'SESSION_CREATED', { hostId: clientId });
+
+      const existing = sessions.get(code);
+      if (existing) {
+        // Reclaim: cancel any pending destroy timer and swap in the new WS.
+        // Keep existing clients and stats intact.
+        clearTimeout(existing._destroyTimer);
+        existing._destroyTimer = null;
+        existing.hostWs = ws;
+        existing.hostId = clientId;
+        send(ws, { type: 'host-ready', code });
+        log('HOST', code, 'SESSION_RECLAIMED', { hostId: clientId, clients: existing.clients.size });
+        // Re-announce all currently connected clients to the host
+        for (const [cid, cws] of existing.clients.entries()) {
+          // We don't have IP/deviceInfo cached; send a minimal re-join notification
+          send(ws, { type: 'client-joined', clientId: cid, ip: '', deviceInfo: '(reconnected)' });
+        }
+      } else {
+        // Fresh session
+        sessions.set(code, {
+          hostWs: ws,
+          hostId: clientId,
+          clients: new Map(),
+          stats: { framesSent: 0, resultsReceived: 0, expResets: 0, createdAt: Date.now() },
+          _destroyTimer: null
+        });
+        send(ws, { type: 'host-ready', code });
+        log('HOST', code, 'SESSION_CREATED', { hostId: clientId });
+      }
       return;
     }
 
@@ -236,16 +276,13 @@ wss.on('connection', (ws) => {
     if (!session) return;
 
     if (ws._role === 'host') {
-      // Host left — notify all clients and destroy session
-      for (const cws of session.clients.values()) send(cws, { type: 'host-left' });
-      log('HOST', ws._code, 'SESSION_DESTROYED', {
-        hostId:          ws._id,
-        framesSent:      session.stats ? session.stats.framesSent : '?',
-        resultsReceived: session.stats ? session.stats.resultsReceived : '?',
-        expResets:       session.stats ? session.stats.expResets : '?',
-        uptimeSec:       session.stats ? Math.round((Date.now()-session.stats.createdAt)/1000) : '?'
-      });
-      sessions.delete(ws._code);
+      // Don't destroy immediately — give the host HOST_GRACE_MS to reconnect.
+      // If host-create arrives within the grace window, the timer is cancelled.
+      log('HOST', ws._code, 'HOST_DISCONNECTED', { hostId: ws._id, graceSec: HOST_GRACE_MS / 1000 });
+      const code = ws._code;
+      session._destroyTimer = setTimeout(() => {
+        destroySession(code);
+      }, HOST_GRACE_MS);
     } else if (ws._role === 'client') {
       session.clients.delete(ws._id);
       send(session.hostWs, { type: 'client-left', clientId: ws._id });
