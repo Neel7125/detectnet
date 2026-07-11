@@ -111,6 +111,7 @@ wss.on('connection', (ws) => {
         deviceInfo: (data && data.deviceInfo) || ''
       });
       log('CLIENT', code, 'CLIENT_JOINED', { clientId, ip, totalClients: session.clients.size });
+      console.log(`\n>>> CLIENT JOINED  code=${code}  id=${clientId}  ip=${ip}  total=${session.clients.size}\n`);
       return;
     }
 
@@ -249,6 +250,7 @@ wss.on('connection', (ws) => {
       session.clients.delete(ws._id);
       send(session.hostWs, { type: 'client-left', clientId: ws._id });
       log('CLIENT', ws._code, 'CLIENT_LEFT', { clientId: ws._id, remaining: session.clients.size });
+      console.log(`\n>>> CLIENT LEFT    code=${ws._code}  id=${ws._id}  remaining=${session.clients.size}\n`);
     }
   });
 
