@@ -1283,6 +1283,8 @@ const S = {
   vidMode:'live', res:RESMAP['480'],
   stream:null, capTimer:null,
   sent:0, totalDet:0, lats:[], sessStart:0,
+  dispatched:0,  // total WS frame messages sent (= sent × SCHEDS.length)
+  lost:0,        // frames forfeited due to client disconnect
   recording:false, mr:null, recChunks:[], recBlob:null,
   _expDoneNotified:false, // tracks whether the completion popup has fired this run
   // per-scheduler frame counters on host (round-robin index per sched)
@@ -1306,10 +1308,16 @@ function show(id){ document.querySelectorAll('.scr').forEach(s=>s.classList.remo
 let _tt; function toast(msg,d=2800){ const t=$('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(_tt); _tt=setTimeout(()=>t.classList.remove('show'),d); }
 
 // ── Experiment Complete Modal ─────────────────────────────────────
-function showExpCompleteModal(frames, elapsed, avgLatMs){
+function showExpCompleteModal(frames, elapsed, avgLatMs, success, lost){
   // Remove any existing modal first
   const existing = document.getElementById('expDoneModal');
   if(existing) existing.remove();
+
+  const successCount = (success != null) ? success : frames * SCHEDS.length;
+  const lostCount    = (lost    != null) ? lost    : 0;
+  const lostLine = lostCount > 0
+    ? `<span style="color:var(--red)">Lost</span> &nbsp;${lostCount} msg(s) (client disconnect)<br>`
+    : '';
 
   const modal = document.createElement('div');
   modal.id = 'expDoneModal';
@@ -1319,7 +1327,8 @@ function showExpCompleteModal(frames, elapsed, avgLatMs){
       <div style="font-size:17px;font-weight:700;color:var(--acc);font-family:var(--display);letter-spacing:.5px">Experiment Complete</div>
       <div style="font-size:12px;font-family:var(--mono);color:var(--txt2);margin-top:10px;line-height:1.8">
         <span style="color:var(--txt)">Frames</span> &nbsp;${frames}<br>
-        <span style="color:var(--txt)">Elapsed</span> &nbsp;${elapsed}s<br>
+        <span style="color:var(--txt)">Succeeded</span> &nbsp;<span style="color:var(--acc)">${successCount}</span><br>
+        ${lostLine}<span style="color:var(--txt)">Elapsed</span> &nbsp;${elapsed}s<br>
         <span style="color:var(--txt)">Avg Latency</span> &nbsp;${avgLatMs}ms
       </div>
       <button onclick="document.getElementById('expDoneModal').remove()" style="margin-top:16px;padding:8px 24px;background:var(--acc);color:#07070f;border:none;border-radius:8px;font-size:13px;font-weight:700;cursor:pointer;font-family:var(--mono)">Dismiss</button>
@@ -1331,7 +1340,10 @@ function showExpCompleteModal(frames, elapsed, avgLatMs){
   // Close on backdrop click
   modal.addEventListener('click', e=>{ if(e.target===modal) modal.remove(); });
   // Also show a toast
-  toast('🎉 Experiment complete — '+frames+' frames in '+elapsed+'s', 5000);
+  const toastMsg = lostCount > 0
+    ? `🎉 Done — ${frames} frames, ${lostCount} lost (disconnect)`
+    : `🎉 Experiment complete — ${frames} frames in ${elapsed}s`;
+  toast(toastMsg, 5000);
 }
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 function sid(id){ return id.replace(/[^a-z0-9]/gi,''); }
@@ -1390,7 +1402,7 @@ function cleanup(){
   if(S.ws){ try{S.ws.close();}catch(e){} }
   Object.assign(S,{
     ws:null, clients:{}, stream:null, capTimer:null,
-    sent:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
+    sent:0,dispatched:0,lost:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
     _expDoneNotified:false,
     schedSent:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
     clientResults:{}, clientResultsReceived: new Set(),
@@ -1411,6 +1423,8 @@ function experimentReset(){
 
   // ── Reset host-side counters ──────────────────────────────
   S.sent      = 0;
+  S.dispatched = 0;
+  S.lost       = 0;
   S.totalDet  = 0;
   S._expDoneNotified = false; // allow completion notification for the new run
   S.lats      = [];
@@ -1687,12 +1701,27 @@ function onClientDrop(clientId){
   const cli = S.clients[clientId];
   const name = (cli && cli.name) || clientId;
   const framesProcessed = cli ? Math.floor((cli.frames||0)/4) : 0;
-  LOG.event('CLIENT_LEFT', { clientId: clientId, name: name, framesProcessed: framesProcessed });
-  console.log('[CLIENT_LEFT] '+name+' | framesProcessed='+framesProcessed+' | remaining='+(Object.keys(S.clients).length-1));
+
+  // Forfeit any in-flight frames for this client so the experiment can still complete.
+  // Each pending slot represents one unresolved WS message (one scheduler × one frame).
+  // Count all tsMap entries × SCHEDS as the real in-flight count.
+  if(cli){
+    const inFlight = cli.tsMap ? Object.keys(cli.tsMap).length : (cli.pend || 0);
+    // Each tsMap entry is one WS message (one scheduler); add directly to lost
+    S.lost = (S.lost||0) + inFlight;
+    // Also clear pend so it doesn't confuse health scores
+    cli.pend = 0;
+  }
+
+  LOG.event('CLIENT_LEFT', { clientId: clientId, name: name, framesProcessed: framesProcessed, lostFrames: cli ? Object.keys(cli.tsMap||{}).length : 0 });
+  console.log('[CLIENT_LEFT] '+name+' | framesProcessed='+framesProcessed+' | remaining='+(Object.keys(S.clients).length-1)+' | lost+='+((cli && cli.tsMap) ? Object.keys(cli.tsMap).length : 0));
   delete S.clients[clientId];
   updateCliCount();
   $('cli-'+sid(clientId))?.remove();
   toast('\u26A0\uFE0F '+name+' disconnected ('+framesProcessed+' frames done)', 3500);
+
+  // Re-check completion — some frames may now be permanently lost
+  checkExpComplete();
 }
 
 function onClientResult(clientId, msg){
@@ -1733,22 +1762,30 @@ function onClientResult(clientId, msg){
   updateSrvStats();
   renderFinalResults();
   updateFrameDistUI();
+  checkExpComplete();
+}
 
-  // ── Experiment completion detection (upload / recorded modes) ────
-  // Live-camera mode has no fixed frame count, so we only fire for
-  // non-live runs where S.sent is settled and all results are back.
-  // S.lats accumulates ONE entry per result message, and each video
-  // frame produces SCHEDS.length (4) results.
-  if(!S._expDoneNotified && S.sent > 0 && S.vidMode !== 'live' && !S.capTimer){
-    const expected = S.sent * SCHEDS.length;
-    if(S.lats.length >= expected){
-      S._expDoneNotified = true;
-      const elapsed = S.sessStart ? ((Date.now()-S.sessStart)/1000).toFixed(1) : '?';
-      const avgLat = Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length);
-      console.log('[EXP_COMPLETE] frames='+S.sent+' results='+S.lats.length+' elapsed='+elapsed+'s avgLat='+avgLat+'ms');
-      LOG.event('EXP_COMPLETE', { frames: S.sent, results: S.lats.length, elapsedSec: elapsed, avgLatMs: avgLat, clients: Object.keys(S.clients).length });
-      showExpCompleteModal(S.sent, elapsed, avgLat);
-    }
+// ── Experiment completion gate ────────────────────────────────────
+// Called after every result AND after every client drop.
+// Fires once per run when: results + lost >= total dispatched.
+// This means: all frames are either answered OR permanently lost
+// (client disconnected mid-experiment), so the experiment is over
+// regardless of how many succeeded.
+function checkExpComplete(){
+  if(S._expDoneNotified) return;
+  if(S.dispatched === 0) return;                  // nothing sent yet
+  if(S.vidMode === 'live' || S.capTimer) return;  // live camera runs indefinitely
+
+  const accounted = S.lats.length + (S.lost||0);
+  if(accounted >= S.dispatched){
+    S._expDoneNotified = true;
+    const elapsed  = S.sessStart ? ((Date.now()-S.sessStart)/1000).toFixed(1) : '?';
+    const avgLat   = S.lats.length ? Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length) : 0;
+    const lost     = S.lost || 0;
+    const success  = S.lats.length;
+    console.log('[EXP_COMPLETE] dispatched='+S.dispatched+' success='+success+' lost='+lost+' elapsed='+elapsed+'s avgLat='+avgLat+'ms');
+    LOG.event('EXP_COMPLETE', { dispatched: S.dispatched, success: success, lost: lost, elapsedSec: elapsed, avgLatMs: avgLat, clients: Object.keys(S.clients).length });
+    showExpCompleteModal(S.sent, elapsed, avgLat, success, lost);
   }
 }
 
@@ -1903,6 +1940,7 @@ function dispatch(jpg,fw,fh){
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
     if(cli) cli.pend=(cli.pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
+    S.dispatched++; // one WS message per scheduler per frame
     pickedThisFrame.add(id);
 
     // Capture the device's current CPU load at the moment of dispatch
