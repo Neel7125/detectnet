@@ -1284,7 +1284,8 @@ const S = {
   stream:null, capTimer:null,
   sent:0, totalDet:0, lats:[], sessStart:0,
   dispatched:0,  // total WS frame messages sent (= sent × SCHEDS.length)
-  lost:0,        // frames forfeited due to client disconnect
+  lost:0,        // reserved (frames are never forfeited on disconnect)
+  orphanFrames:[], // pending frames waiting for a client after disconnect
   recording:false, mr:null, recChunks:[], recBlob:null,
   _expDoneNotified:false, // tracks whether the completion popup has fired this run
   // per-scheduler frame counters on host (round-robin index per sched)
@@ -1402,7 +1403,7 @@ function cleanup(){
   if(S.ws){ try{S.ws.close();}catch(e){} }
   Object.assign(S,{
     ws:null, clients:{}, stream:null, capTimer:null,
-    sent:0,dispatched:0,lost:0,totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
+    sent:0,dispatched:0,lost:0,orphanFrames:[],totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
     _expDoneNotified:false,
     schedSent:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
     clientResults:{}, clientResultsReceived: new Set(),
@@ -1425,6 +1426,7 @@ function experimentReset(){
   S.sent      = 0;
   S.dispatched = 0;
   S.lost       = 0;
+  S.orphanFrames = [];
   S.totalDet  = 0;
   S._expDoneNotified = false; // allow completion notification for the new run
   S.lats      = [];
@@ -1701,6 +1703,55 @@ function onClientJoined(clientId, ip, deviceInfo){
   setStatus('s',totalNow+' client(s) connected','g');
   console.log('[CLIENT_JOINED] '+name+' | ip='+( ip||'?')+' | totalClients='+totalNow);
   LOG.event('CLIENT_JOINED', { clientId: clientId, name: name, ip: ip||'?', device: deviceInfo||'?', totalClients: totalNow });
+
+  // Retransmit any frames that were queued while no clients were connected
+  const flushed = flushOrphanFrames();
+  if(flushed > 0){
+    toast('Retransmitted '+flushed+' pending frame(s) to '+name, 3000);
+    updateFrameDistUI();
+  }
+}
+
+// Send one pending frame to a live client. Returns false if no clients available
+// (caller should queue it). Never discards the frame.
+function sendPendingFrame(frame, meta){
+  if(!frame || !frame.jpg) return false;
+  const cids = Object.keys(S.clients);
+  if(!cids.length) return false;
+
+  const id = cids.length === 1 ? cids[0] : pickClientForSched(frame.sched);
+  const target = id ? S.clients[id] : null;
+  if(!target) return false;
+
+  let newTs = (sendPendingFrame._tsBase = (sendPendingFrame._tsBase || Date.now()) + 1);
+  while(target.tsMap[newTs]) newTs = ++sendPendingFrame._tsBase;
+  target.tsMap[newTs] = { sched: frame.sched, jpg: frame.jpg, fw: frame.fw, fh: frame.fh };
+  target.pend = (target.pend||0) + 1;
+  target.dispatchedFrames = (target.dispatchedFrames||0) + 1;
+  wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg:frame.jpg, fw:frame.fw, fh:frame.fh, ts:newTs, sched:frame.sched } });
+  LOG.event('FRAME_REASSIGN', {
+    from: (meta && meta.from) || '?', fromId: (meta && meta.fromId) || '?',
+    to: target.name||id, toId: id,
+    sched: frame.sched, oldTs: frame.ts, newTs: newTs
+  });
+  return true;
+}
+
+// Flush host-side orphan queue onto currently connected clients.
+function flushOrphanFrames(){
+  if(!S.orphanFrames || !S.orphanFrames.length) return 0;
+  if(!Object.keys(S.clients).length) return 0;
+
+  const queue = S.orphanFrames.splice(0);
+  let sent = 0;
+  const stillWaiting = [];
+  queue.forEach(frame=>{
+    if(sendPendingFrame(frame, { from:'orphan-queue', fromId:'orphan' })) sent++;
+    else stillWaiting.push(frame);
+  });
+  if(stillWaiting.length) S.orphanFrames = stillWaiting.concat(S.orphanFrames);
+  if(sent > 0) console.log('[ORPHAN_FLUSH] retransmitted='+sent+' remaining='+S.orphanFrames.length);
+  return sent;
 }
 
 function onClientDrop(clientId){
@@ -1708,25 +1759,55 @@ function onClientDrop(clientId){
   const name = (cli && cli.name) || clientId;
   const framesProcessed = cli ? Math.floor((cli.frames||0)/4) : 0;
 
-  // Forfeit any in-flight frames for this client so the experiment can still complete.
-  // Each pending slot represents one unresolved WS message (one scheduler × one frame).
-  // Count all tsMap entries × SCHEDS as the real in-flight count.
-  if(cli){
-    const inFlight = cli.tsMap ? Object.keys(cli.tsMap).length : (cli.pend || 0);
-    // Each tsMap entry is one WS message (one scheduler); add directly to lost
-    S.lost = (S.lost||0) + inFlight;
-    // Also clear pend so it doesn't confuse health scores
+  // Collect in-flight frames BEFORE removing the client so we can retransmit them.
+  // Each tsMap entry is one unresolved WS message (one scheduler × one frame).
+  const pending = [];
+  if(cli && cli.tsMap){
+    Object.keys(cli.tsMap).forEach(tsKey=>{
+      const entry = cli.tsMap[tsKey];
+      const sched = (entry && typeof entry === 'object') ? entry.sched : entry;
+      pending.push({
+        ts:    Number(tsKey),
+        sched: sched || 'greedy',
+        jpg:   (entry && typeof entry === 'object') ? entry.jpg : null,
+        fw:    (entry && typeof entry === 'object') ? entry.fw  : null,
+        fh:    (entry && typeof entry === 'object') ? entry.fh  : null
+      });
+    });
     cli.pend = 0;
   }
 
-  LOG.event('CLIENT_LEFT', { clientId: clientId, name: name, framesProcessed: framesProcessed, lostFrames: cli ? Object.keys(cli.tsMap||{}).length : 0 });
-  console.log('[CLIENT_LEFT] '+name+' | framesProcessed='+framesProcessed+' | remaining='+(Object.keys(S.clients).length-1)+' | lost+='+((cli && cli.tsMap) ? Object.keys(cli.tsMap).length : 0));
+  LOG.event('CLIENT_LEFT', { clientId: clientId, name: name, framesProcessed: framesProcessed, pendingFrames: pending.length });
+  console.log('[CLIENT_LEFT] '+name+' | framesProcessed='+framesProcessed+' | pending='+pending.length+' | remaining='+(Object.keys(S.clients).length-1));
+
   delete S.clients[clientId];
   updateCliCount();
   $('cli-'+sid(clientId))?.remove();
-  toast('\u26A0\uFE0F '+name+' disconnected ('+framesProcessed+' frames done)', 3500);
 
-  // Re-check completion — some frames may now be permanently lost
+  // Retransmit to other live clients, or queue until a client (re)joins.
+  // Frames are never forfeited.
+  let reassigned = 0, queued = 0;
+  pending.forEach(frame=>{
+    if(!frame.jpg){
+      console.warn('[CLIENT_LEFT] pending frame missing jpg — cannot retransmit', frame.sched, frame.ts);
+      return;
+    }
+    if(sendPendingFrame(frame, { from:name, fromId:clientId })){
+      reassigned++;
+    } else {
+      S.orphanFrames.push(frame);
+      queued++;
+    }
+  });
+
+  console.log('[CLIENT_LEFT] reassigned='+reassigned+' queued='+queued+' orphans='+S.orphanFrames.length);
+  const toastExtra = reassigned > 0
+    ? (', reassigned '+reassigned+' pending frame(s)')
+    : (queued > 0 ? (', queued '+queued+' frame(s) until a client reconnects') : '');
+  toast('\u26A0\uFE0F '+name+' disconnected ('+framesProcessed+' frames done'+toastExtra+')', 3500);
+  updateFrameDistUI();
+
+  // Do NOT mark experiment complete while orphans remain — wait for retransmit + results
   checkExpComplete();
 }
 
@@ -1735,8 +1816,10 @@ function onClientResult(clientId, msg){
   const lat = Date.now() - msg.ts;
   const dets = msg.dets || [];
   // use tsMap as primary source, fall back to msg.sched
-  const sched = (cli.tsMap && cli.tsMap[msg.ts]) || msg.sched || 'greedy';
-  if(cli.tsMap) delete cli.tsMap[msg.ts]; // clean up
+  // tsMap values are {sched,jpg,fw,fh} objects (legacy: bare sched string)
+  const entry = cli.tsMap && cli.tsMap[msg.ts];
+  const sched = (entry && typeof entry === 'object' ? entry.sched : entry) || msg.sched || 'greedy';
+  if(cli.tsMap) delete cli.tsMap[msg.ts]; // clean up (also frees retained jpg)
   const frameNum = Math.floor(cli.frames/4) + 1;
   cli.frames++; cli.dets+=dets.length; cli.lats.push(lat); cli.pend=Math.max(0,(cli.pend||1)-1);
   if(!cli.schedLats[sched]) cli.schedLats[sched]=[];
@@ -1772,26 +1855,25 @@ function onClientResult(clientId, msg){
 }
 
 // ── Experiment completion gate ────────────────────────────────────
-// Called after every result AND after every client drop.
-// Fires once per run when: results + lost >= total dispatched.
-// This means: all frames are either answered OR permanently lost
-// (client disconnected mid-experiment), so the experiment is over
-// regardless of how many succeeded.
+// Called after every result AND after every client drop/join flush.
+// Fires once per run when every dispatched frame has a result.
+// Disconnect never forfeits frames — they are reassigned or held in
+// S.orphanFrames until a client is available, so lost stays 0.
 function checkExpComplete(){
   if(S._expDoneNotified) return;
   if(S.dispatched === 0) return;                  // nothing sent yet
   if(S.vidMode === 'live' || S.capTimer) return;  // live camera runs indefinitely
+  if(S.orphanFrames && S.orphanFrames.length) return; // still waiting for a client
 
-  const accounted = S.lats.length + (S.lost||0);
+  const accounted = S.lats.length;
   if(accounted >= S.dispatched){
     S._expDoneNotified = true;
     const elapsed  = S.sessStart ? ((Date.now()-S.sessStart)/1000).toFixed(1) : '?';
     const avgLat   = S.lats.length ? Math.round(S.lats.reduce((a,b)=>a+b,0)/S.lats.length) : 0;
-    const lost     = S.lost || 0;
     const success  = S.lats.length;
-    console.log('[EXP_COMPLETE] dispatched='+S.dispatched+' success='+success+' lost='+lost+' elapsed='+elapsed+'s avgLat='+avgLat+'ms');
-    LOG.event('EXP_COMPLETE', { dispatched: S.dispatched, success: success, lost: lost, elapsedSec: elapsed, avgLatMs: avgLat, clients: Object.keys(S.clients).length });
-    showExpCompleteModal(S.sent, elapsed, avgLat, success, lost);
+    console.log('[EXP_COMPLETE] dispatched='+S.dispatched+' success='+success+' elapsed='+elapsed+'s avgLat='+avgLat+'ms');
+    LOG.event('EXP_COMPLETE', { dispatched: S.dispatched, success: success, lost: 0, elapsedSec: elapsed, avgLatMs: avgLat, clients: Object.keys(S.clients).length });
+    showExpCompleteModal(S.sent, elapsed, avgLat, success, 0);
   }
 }
 
@@ -1942,7 +2024,8 @@ function dispatch(jpg,fw,fh){
     if(!id) return;
     const ts=Date.now();
     const cli = S.clients[id];
-    if(cli) cli.tsMap[ts]=sched;
+    // Retain payload so pending frames can be retransmitted if this client disconnects
+    if(cli) cli.tsMap[ts]={ sched, jpg, fw, fh };
     wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
     if(cli) cli.pend=(cli.pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
