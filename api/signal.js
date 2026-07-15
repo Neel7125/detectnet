@@ -1,7 +1,12 @@
 // ─────────────────────────────────────────────────────────────────
-//  /api/signal.js  — Vercel Serverless Signaling
+//  /api/signal.js  — Vercel Serverless Signaling (LEGACY)
 //
-//  Storage: Upstash Redis (recommended) OR in-memory fallback
+//  The main DetectNet app uses WebSocket relay (server.js on
+//  Railway/Render). This HTTP poll endpoint is a legacy fallback.
+//
+//  Redis is REQUIRED — no in-memory fallback. Vercel serverless
+//  instances do not share memory; without Redis, host and clients
+//  on different instances silently never see each other's messages.
 //
 //  Set in Vercel dashboard → Environment Variables:
 //    UPSTASH_REDIS_REST_URL   = https://xxx.upstash.io
@@ -11,15 +16,11 @@
 const REDIS_URL   = process.env.UPSTASH_REDIS_REST_URL;
 const REDIS_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN;
 const USE_REDIS   = !!(REDIS_URL && REDIS_TOKEN);
-const TTL         = 1800; // 30 min
-
-// ── In-memory fallback ────────────────────────────────────────────
-if (!global._dn_sessions) global._dn_sessions = new Map();
-const MEM = global._dn_sessions;
+const TTL         = 3600; // 1 hour — orphaned sessions auto-expire
 
 // ── Upstash Redis helpers — uses POST JSON body (correct REST API) ─
 async function redisExec(command) {
-  // command is an array e.g. ['SET', 'key', 'value', 'EX', '1800']
+  // command is an array e.g. ['SET', 'key', 'value', 'EX', '3600']
   const res = await fetch(REDIS_URL, {
     method: 'POST',
     headers: {
@@ -37,35 +38,18 @@ async function redisExec(command) {
 }
 
 async function redisGet(key) {
-  if (!USE_REDIS) return MEM.get(key) || null;
   const raw = await redisExec(['GET', key]);
   if (!raw) return null;
   try { return JSON.parse(raw); } catch(e) { return null; }
 }
 
 async function redisSet(key, val) {
-  const s = JSON.stringify(val);
-  if (USE_REDIS) {
-    await redisExec(['SET', key, s, 'EX', String(TTL)]);
-  } else {
-    MEM.set(key, val);
-    setTimeout(() => MEM.delete(key), TTL * 1000);
-  }
+  // Always set EX TTL so ghost sessions never linger past 1 hour
+  await redisExec(['SET', key, JSON.stringify(val), 'EX', String(TTL)]);
 }
 
 async function redisDel(key) {
-  if (USE_REDIS) await redisExec(['DEL', key]);
-  else MEM.delete(key);
-}
-
-// ── Cleanup stale in-memory sessions ─────────────────────────────
-if (!USE_REDIS && !global._dn_cleanup) {
-  global._dn_cleanup = setInterval(() => {
-    const now = Date.now();
-    for (const [k, v] of MEM.entries()) {
-      if (now - (v.ts || 0) > TTL * 1000) MEM.delete(k);
-    }
-  }, 600_000);
+  await redisExec(['DEL', key]);
 }
 
 // ── Main handler ──────────────────────────────────────────────────
@@ -74,6 +58,16 @@ export default async function handler(req, res) {
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
   if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+
+  // Fail hard without Redis — in-memory fallback is broken on Vercel
+  // (host/client land on different instances and never exchange msgs).
+  if (!USE_REDIS) {
+    res.status(503).json({
+      ok: false,
+      error: 'Signaling requires Upstash Redis. Set UPSTASH_REDIS_REST_URL and UPSTASH_REDIS_REST_TOKEN, or use the WebSocket server (server.js) instead.',
+    });
+    return;
+  }
 
   // Parse body or query
   let body = {};

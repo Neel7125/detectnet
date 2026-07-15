@@ -109,6 +109,7 @@ wss.on('connection', (ws) => {
           hostWs: ws,
           hostId: clientId,
           clients: new Map(),
+          recentClients: new Map(), // clientId → leftAt ms (for CLIENT_RECONNECT)
           stats: { framesSent: 0, resultsReceived: 0, expResets: 0, createdAt: Date.now() },
           _destroyTimer: null
         });
@@ -129,6 +130,14 @@ wss.on('connection', (ws) => {
       ws._id = clientId;
       ws._code = code;
       ws._role = 'client';
+
+      // Same clientId still connected OR recently left → CLIENT_RECONNECT
+      if (!session.recentClients) session.recentClients = new Map();
+      const RECONNECT_WINDOW_MS = 5 * 60 * 1000;
+      const recentLeftAt = session.recentClients.get(clientId);
+      const wasRecent = recentLeftAt && (Date.now() - recentLeftAt) < RECONNECT_WINDOW_MS;
+      const isReconnect = session.clients.has(clientId) || !!wasRecent;
+      session.recentClients.delete(clientId);
       session.clients.set(clientId, ws);
 
       // Extract real IP — handle reverse-proxy X-Forwarded-For (Render, Railway, etc.)
@@ -142,16 +151,19 @@ wss.on('connection', (ws) => {
       const ip = (xfwd ? xfwd.split(',')[0].trim() : rawIp)
                    .replace(/^::ffff:/, ''); // strip IPv4-mapped IPv6 prefix
 
-      send(ws, { type: 'joined', hostId: session.hostId });
-      // Notify host — include ip and device info from the join message
+      send(ws, { type: 'joined', hostId: session.hostId, reconnected: isReconnect });
+      // Notify host — distinct event so host can restore pending/metrics state
       send(session.hostWs, {
-        type: 'client-joined',
+        type: isReconnect ? 'client-reconnected' : 'client-joined',
         clientId,
         ip,
-        deviceInfo: (data && data.deviceInfo) || ''
+        deviceInfo: (data && data.deviceInfo) || '',
+        previousClientId: (data && data.previousClientId) || clientId
       });
-      log('CLIENT', code, 'CLIENT_JOINED', { clientId, ip, totalClients: session.clients.size });
-      console.log(`\n>>> CLIENT JOINED  code=${code}  id=${clientId}  ip=${ip}  total=${session.clients.size}\n`);
+      log('CLIENT', code, isReconnect ? 'CLIENT_RECONNECT' : 'CLIENT_JOINED', {
+        clientId, ip, totalClients: session.clients.size
+      });
+      console.log(`\n>>> CLIENT ${isReconnect ? 'RECONNECTED' : 'JOINED'}  code=${code}  id=${clientId}  ip=${ip}  total=${session.clients.size}\n`);
       return;
     }
 
@@ -285,6 +297,8 @@ wss.on('connection', (ws) => {
       }, HOST_GRACE_MS);
     } else if (ws._role === 'client') {
       session.clients.delete(ws._id);
+      if (!session.recentClients) session.recentClients = new Map();
+      session.recentClients.set(ws._id, Date.now());
       send(session.hostWs, { type: 'client-left', clientId: ws._id });
       log('CLIENT', ws._code, 'CLIENT_LEFT', { clientId: ws._id, remaining: session.clients.size });
       console.log(`\n>>> CLIENT LEFT    code=${ws._code}  id=${ws._id}  remaining=${session.clients.size}\n`);

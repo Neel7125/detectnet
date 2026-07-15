@@ -77,7 +77,7 @@ All runtime state lives in a single global object `S`.
 
 ### Signaling Fallback
 
-`api/signal.js` is a Vercel serverless function providing HTTP-based signaling (create/join/post/poll/destroy). It uses Upstash Redis when configured, or falls back to an in-memory `Map`. This is a legacy/alternative path — the main app uses the WebSocket server directly.
+`api/signal.js` is a legacy Vercel serverless HTTP poll endpoint. It **requires** Upstash Redis (`EX 3600` TTL on every write). There is no in-memory fallback — without Redis it returns 503. The main app uses the WebSocket server directly and should not depend on this endpoint.
 
 ---
 
@@ -151,16 +151,16 @@ const WS_URL = 'wss://your-app-name.onrender.com';
 3. Your URL will be `wss://your-app-name.koyeb.app`
 4. Update `WS_URL` in `public/index.html` to that URL
 
-### Optional: Upstash Redis (for signaling)
+### Optional: Upstash Redis (legacy HTTP signaling only)
 
-If you want the HTTP signaling fallback to persist across serverless cold starts:
+The main app uses WebSocket (`server.js`) and does **not** need Redis. If you still use the legacy `/api/signal` HTTP poll endpoint:
 
 1. Create a free database at [upstash.com](https://upstash.com)
 2. Add to Vercel environment variables:
    - `UPSTASH_REDIS_REST_URL`
    - `UPSTASH_REDIS_REST_TOKEN`
 
-Without these, the signaling endpoint uses in-memory storage (fine for single-instance use).
+Redis is **required** for that endpoint — there is no in-memory fallback (silent failure across Vercel instances). Session keys expire after **1 hour** (`EX 3600`).
 
 ---
 
@@ -229,13 +229,13 @@ Adds a genetic crossover step. Scores all clients, blends the top two with a 70/
 
 ## Health Metrics
 
-Clients measure and report five metrics every 3 seconds. The host uses these to drive scheduler decisions.
+Clients measure and report five metrics every **2 seconds** (fixed interval, decoupled from frame throughput). The host uses these to drive scheduler decisions.
 
 | Metric | Source | iOS Support |
 |--------|--------|-------------|
 | Battery | Battery Status API | ✗ N/A |
 | CPU free | rAF jank detector + sync benchmark | ✓ |
-| Network | `navigator.connection.downlink` | Partial |
+| Network | RTT-derived score (scheduling); `effectiveType` + coarse downlink (display) | Partial |
 | FPS | frames processed / elapsed time | ✓ |
 | Memory free | `performance.memory` heap ratio | ✗ Fixed 50% |
 
@@ -257,10 +257,7 @@ Two methods run in parallel:
 
 ### Network Measurement
 
-Priority order:
-1. `navigator.connection.downlink` (Mbps) — Chrome Android
-2. `navigator.connection.effectiveType` mapping (4G→85%, 3G→50%, 2G→25%, slow-2g→10%)
-3. Derived from recent frame latencies as a fallback
+Scheduling uses **measured frame RTT** for the throughput score. `navigator.connection.downlink` is shown in the UI as a coarse estimate only (browser buckets: 0.5/1/2/10 Mbps) and is not used as a research bandwidth metric.
 
 ---
 
@@ -303,11 +300,11 @@ After frames are processed, the host renders a comparison table:
 | Scheduler | Algorithm name |
 | Compl. Time (s) | Average completion time = avg latency / 1000 |
 | Latency (ms) | Average round-trip latency across all clients |
-| Energy (KJ) | Estimated energy = (15W × time) / 1000 |
+| Energy (KJ) | Device power-model W × completion time / 1000 |
 
 A TOTAL row sums all schedulers. A per-client frame distribution bar shows how many frames each client processed.
 
-The table updates live as results arrive. Energy is estimated using a fixed 15W device power assumption.
+The table updates live as results arrive. Energy uses a per-device active-wattage lookup (not the Battery API).
 
 > **Note:** The `results.js` file and the `RES` module are present in the codebase but the host currently ignores `sched-result` messages from clients and recomputes everything from raw `result` latency data directly.
 
@@ -344,6 +341,7 @@ All messages are JSON. The server routes them based on `type`.
 | `host-ready` | `code` | Session created successfully |
 | `joined` | `hostId` | Client joined successfully |
 | `client-joined` | `clientId` | Notifies host a client connected |
+| `client-reconnected` | `clientId` | Notifies host a prior client rejoined (same clientId) |
 | `client-left` | `clientId` | Notifies host a client disconnected |
 | `host-left` | — | Notifies clients the host ended the session |
 | `frame` | `jpg`, `ts`, `fw`, `fh`, `sched` | Frame delivered to client |
@@ -359,7 +357,9 @@ Constants in `public/index.html`:
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `WS_URL` | Render/Fly.io URL | WebSocket relay server address |
-| `POWER_W` | `15` | Assumed device power draw in watts (for energy estimation) |
+| `DEVICE_POWER_TABLE` | UA/name lookups | Active wattage per device class for energy (KJ) |
+| `DEFAULT_PHONE_W` | `4.0` | Fallback active watts when device is unknown |
+| `HEALTH_MS` | `2000` | Fixed health + sched-result interval (decoupled from frames) |
 | `CAPTURE_MS` | `220` | Frame capture interval in milliseconds (~4.5 fps) |
 | `RESMAP` | 240/480/720p | Resolution presets for live camera |
 
@@ -381,9 +381,11 @@ Constants in `public/index.html`:
 
 ## Known Limitations
 
-**Energy estimation is approximate.** A fixed 15W power assumption is used for all devices. Actual power draw varies significantly between devices and workloads.
+**Energy is model-based.** Wattage comes from a device lookup table (name/UA → active W), not from the Battery Status API (which has no power reading). Values are defensible for relative scheduler comparisons but are not lab-grade calorimetry.
 
 **Battery unavailable on iOS.** The Battery Status API is not supported on iOS Safari. Battery is excluded from health scoring on those devices.
+
+**`navigator.connection.downlink` is coarse.** It returns rounded buckets (0.5/1/2/10 Mbps) and is labeled as an estimate. Scheduling uses RTT-derived throughput instead.
 
 **`performance.memory` is Chrome-only.** Memory metrics fall back to a fixed 50% on Firefox and Safari.
 

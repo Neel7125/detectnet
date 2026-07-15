@@ -373,6 +373,16 @@ body{color:var(--txt);font-family:var(--disp)}
       <div id="sFrameDistList" style="font-size:11px;font-family:var(--mono);color:var(--txt3)">Waiting...</div>
     </div>
 
+    <!-- Frame Quota (fair allocation for controlled experiments) -->
+    <div class="card" id="sFrameQuotaSec">
+      <div class="lbl">Frame Quota Per Client</div>
+      <div style="font-size:10px;font-family:var(--mono);color:var(--txt2);margin-bottom:8px">0 = unlimited (scheduler decides). Set N so each client gets at most N frames — keeps comparisons fair.</div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <input type="number" id="frameQuotaInp" min="0" value="0" style="flex:1;background:var(--bg3);border:1px solid var(--bord2);border-radius:var(--rs);padding:8px 10px;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--acc);outline:none;text-align:center" onchange="applyGlobalFrameQuota()">
+        <button class="btn btn-gh btn-sm" onclick="applyGlobalFrameQuota()">Apply</button>
+      </div>
+    </div>
+
     <div id="sDetSec" style="display:none">
       <div class="sechd"><span class="sect">Cluster Detections</span><span class="seca" onclick="clearDets()">Clear</span></div>
       <div class="detscr" id="sDetList"></div>
@@ -796,7 +806,7 @@ var LOG = (function(){
     // ── 5. Energy consumption by device and scheduler (KJ) ──────
     lines.push('');
     lines.push('  ┌─ ENERGY CONSUMPTION (KJ) — PER DEVICE × SCHEDULER ──────────');
-    lines.push('  │  (Energy ≈ POWER_W × latency_s / 1000 · per frame processed)');
+    lines.push('  │  (Energy = device_active_W × latency_s / 1000 · per frame processed)');
     lines.push('  │  ' + _pad('Device',22) + _SCHEDS.map(function(s){ return _pad(_SCHED_NAMES[s],16); }).join('') + _pad('TOTAL',14));
     lines.push('  │  ' + '─'.repeat(100));
     if(!deviceIds.length){
@@ -900,7 +910,7 @@ var LOG = (function(){
     var TYPE_COLOR = {
       'DISPATCH':'#00ff88',   'RESULT_OK':'#4d8fff',   'DETECT_DONE':'#aa66ff',
       'FRAME_FAIL':'#ff4466', 'FRAME_TIMEOUT':'#ffaa00','EXP_RESET':'#ffaa00',
-      'CLIENT_JOINED':'#00ff88','CLIENT_LEFT':'#ff4466','HOST_RESET':'#ffaa00',
+      'CLIENT_JOINED':'#00ff88','CLIENT_RECONNECT':'#4d8fff','CLIENT_LEFT':'#ff4466','HOST_RESET':'#ffaa00',
       'FRAME_DROP':'#ff4466', 'RELAY_FRAME':'#4d8fff',  'DETECT_ERR':'#ff4466',
       'CLIENT_RESET':'#ffaa00','SESSION_START':'#00ff88'
     };
@@ -1268,9 +1278,44 @@ var RES = (function() {
 
 const WS_URL = 'wss://detectnet-1.onrender.com';
 
+// Device power model (W active inference). Battery Status API has no wattage.
+// Energy_KJ = activeW × execution_time_s / 1000
+const DEVICE_POWER_TABLE = [
+  { match: /pixel\s*8a/i,              activeW: 3.8 },
+  { match: /pixel\s*8/i,               activeW: 4.0 },
+  { match: /pixel\s*7/i,               activeW: 4.0 },
+  { match: /pixel/i,                   activeW: 3.9 },
+  { match: /galaxy\s*a14|sm-a14|samsung.*a14/i, activeW: 4.2 },
+  { match: /galaxy\s*a5[0-9]|sm-a5/i,  activeW: 4.5 },
+  { match: /galaxy\s*s2[3-5]|sm-s9/i,  activeW: 5.5 },
+  { match: /samsung|galaxy/i,          activeW: 4.3 },
+  { match: /redmi|xiaomi|poco/i,       activeW: 4.0 },
+  { match: /oneplus|oppo|vivo|realme/i, activeW: 4.1 },
+  { match: /lava/i,                    activeW: 3.5 },
+  { match: /iphone\s*1[5-6]/i,         activeW: 4.8 },
+  { match: /iphone\s*1[3-4]/i,         activeW: 4.5 },
+  { match: /iphone|ipad/i,             activeW: 4.0 },
+  { match: /android/i,                 activeW: 4.0 },
+  { match: /windows|mac|linux|desktop/i, activeW: 15.0 },
+];
+const DEFAULT_PHONE_W = 4.0;
 
-const POWER_W    = 15;
+function lookupDevicePowerW(deviceName){
+  const hay = ((deviceName || '') + ' ' + (typeof navigator !== 'undefined' ? navigator.userAgent : '')).toLowerCase();
+  for(let i=0;i<DEVICE_POWER_TABLE.length;i++){
+    if(DEVICE_POWER_TABLE[i].match.test(hay)) return DEVICE_POWER_TABLE[i].activeW;
+  }
+  return DEFAULT_PHONE_W;
+}
+
+// Energy in kilojoules: P(W) × t(s) / 1000
+function calcFrameEnergyKJ(latencyMs, deviceName){
+  const W = lookupDevicePowerW(deviceName);
+  return (W * (latencyMs / 1000)) / 1000;
+}
+
 const CAPTURE_MS = 220;
+const HEALTH_MS  = 2000; // fixed health sampling interval (decoupled from frame rate)
 const RESMAP = { '240':{w:426,h:240}, '480':{w:854,h:480}, '720':{w:1280,h:720} };
 const SCHEDS = ['greedy','pso','mompso','mompso-ga'];
 const SCHED_NAMES = {greedy:'Greedy',pso:'PSO',mompso:'MOMPSO','mompso-ga':'MOMPSO-GA'};
@@ -1280,6 +1325,11 @@ const S = {
   mode:null, myId:null, code:null,
   ws:null,
   clients:{},       // clientId -> { name, health, frames, dets, lats, pend, schedLats:{}, schedFrames:{} }
+  leftClients:{},   // clientId -> snapshot after CLIENT_LEFT (for CLIENT_RECONNECT restore)
+  defaultFrameQuota:0, // 0 = unlimited; applied to new clients
+  _nextTs:0,        // monotonic session-level frame ID (avoids Date.now() collisions)
+  _reconnectAttempts:0,
+  _reconnectTimer:null,
   vidMode:'live', res:RESMAP['480'],
   stream:null, capTimer:null,
   sent:0, totalDet:0, lats:[], sessStart:0,
@@ -1355,9 +1405,9 @@ function setStatus(role,msg,dotClass){
   $(d).className='sbdot '+(dotClass||''); $(t).textContent=msg;
 }
 
-function goHome(){ cleanup(); show('home'); }
-function goServer(){ S.mode='server'; show('srvScr'); initServer(); }
-function goClient(){ S.mode='client'; show('cliScr'); initClient(); }
+function goHome(){ S._suppressReconnect = true; clearReconnectState(); cleanup(); S.mode=null; show('home'); }
+function goServer(){ S._suppressReconnect = false; S.mode='server'; show('srvScr'); initServer(); }
+function goClient(){ S._suppressReconnect = false; S.mode='client'; show('cliScr'); initClient(); }
 
 // ── Device Name Prompt ────────────────────────────────────────────
 // Shown once on first load, or whenever name is missing.
@@ -1398,13 +1448,14 @@ function changeDeviceName(){
 
 function cleanup(){
   clearInterval(S.capTimer); clearInterval(S.healthTimer); clearInterval(S._pingTimer);
+  clearTimeout(S._reconnectTimer);
   stopStream();
   releaseWakeLock();
   if(S.ws){ try{S.ws.close();}catch(e){} }
   Object.assign(S,{
-    ws:null, clients:{}, stream:null, capTimer:null,
+    ws:null, clients:{}, leftClients:{}, stream:null, capTimer:null,
     sent:0,dispatched:0,lost:0,orphanFrames:[],totalDet:0,lats:[],recChunks:[],recBlob:null,sessStart:0,
-    _expDoneNotified:false,
+    _expDoneNotified:false, _nextTs:0, _reconnectAttempts:0, _reconnectTimer:null,
     schedSent:{ greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
     clientResults:{}, clientResultsReceived: new Set(),
     frDone:0,objFound:0,cliLats:[],cliEnergySum:0,
@@ -1429,6 +1480,7 @@ function experimentReset(){
   S.orphanFrames = [];
   S.totalDet  = 0;
   S._expDoneNotified = false; // allow completion notification for the new run
+  S._nextTs   = Date.now();   // reset monotonic frame IDs for this experiment
   S.lats      = [];
   S.sessStart = Date.now();
   S.schedSent = { greedy:0, pso:0, mompso:0, 'mompso-ga':0 };
@@ -1444,6 +1496,7 @@ function experimentReset(){
     cli.schedLats = { greedy:[], pso:[], mompso:[], 'mompso-ga':[] };
     cli.tsMap  = {};
   });
+  S.leftClients = {};
 
   // Reset RES module
   RES.hostReset();
@@ -1495,25 +1548,55 @@ function stopStream(){ if(S.stream){ S.stream.getTracks().forEach(t=>t.stop()); 
 
 // ── WebSocket ─────────────────────────────────────────────────────
 function wsSend(obj){
-  if(S.ws && S.ws.readyState===WebSocket.OPEN){
-    try{
-      var raw = JSON.stringify(obj);
-      S.ws.send(raw);
-    }catch(e){ return; }
-    // Log the outgoing packet — in a separate try so logging never blocks sends
-    try{
-      var d = obj.data || {};
-      var sched  = d.sched || obj.sched || '';
-      var device = (d.to && S.clients && S.clients[d.to] && S.clients[d.to].name) || d.to || '';
-      var extra  = '';
-      if(obj.type==='frame')    extra = 'fw='+d.fw+' fh='+d.fh+' ts='+d.ts;
-      if(obj.type==='result')   extra = 'dets='+(d.dets?d.dets.length:0)+' ts='+d.ts;
-      if(obj.type==='health')   extra = 'cpu='+(d.h&&d.h.cpu!=null?d.h.cpu:'?')+'%';
-      if(obj.type==='exp-reset')extra = 'expId='+(d.expId||'?');
-      var byteLen = raw ? raw.length : 0;
-      NET.logPacket('TX', obj.type, byteLen, sched, device, 'SENT', extra);
-    }catch(e){ /* logging must never crash the app */ }
-  }
+  // Never send on a closed/closing socket — prevents silent frame loss
+  if(!S.ws || S.ws.readyState !== WebSocket.OPEN) return false;
+  try{
+    var raw = JSON.stringify(obj);
+    S.ws.send(raw);
+  }catch(e){ return false; }
+  // Log the outgoing packet — in a separate try so logging never blocks sends
+  try{
+    var d = obj.data || {};
+    var sched  = d.sched || obj.sched || '';
+    var device = (d.to && S.clients && S.clients[d.to] && S.clients[d.to].name) || d.to || '';
+    var extra  = '';
+    if(obj.type==='frame')    extra = 'fw='+d.fw+' fh='+d.fh+' ts='+d.ts;
+    if(obj.type==='result')   extra = 'dets='+(d.dets?d.dets.length:0)+' ts='+d.ts;
+    if(obj.type==='health')   extra = 'cpu='+(d.h&&d.h.cpu!=null?d.h.cpu:'?')+'%';
+    if(obj.type==='exp-reset')extra = 'expId='+(d.expId||'?');
+    var byteLen = raw ? raw.length : 0;
+    NET.logPacket('TX', obj.type, byteLen, sched, device, 'SENT', extra);
+  }catch(e){ /* logging must never crash the app */ }
+  return true;
+}
+
+function nextFrameTs(){
+  // Monotonic session-level IDs — Date.now() collides when 4 schedulers fire in the same ms
+  if(!S._nextTs) S._nextTs = Date.now();
+  return ++S._nextTs;
+}
+
+function scheduleReconnect(){
+  if(S._suppressReconnect) return;
+  if(!S.mode || !S.code || !S.myId) return;
+  if(S._reconnectTimer) return;
+  const attempt = S._reconnectAttempts || 0;
+  const delay = Math.min(30000, 1000 * Math.pow(2, attempt));
+  S._reconnectAttempts = attempt + 1;
+  console.log('[WS] reconnect scheduled in '+delay+'ms (attempt '+(attempt+1)+')');
+  S._reconnectTimer = setTimeout(()=>{
+    S._reconnectTimer = null;
+    if(S._suppressReconnect) return;
+    if(S.ws && S.ws.readyState === WebSocket.OPEN) return;
+    toast('Reconnecting...');
+    if(S.mode === 'server') _wsReconnectServer();
+    else if(S.mode === 'client') _wsReconnectClient();
+  }, delay);
+}
+
+function clearReconnectState(){
+  S._reconnectAttempts = 0;
+  if(S._reconnectTimer){ clearTimeout(S._reconnectTimer); S._reconnectTimer = null; }
 }
 function connectWS(onOpen, onMsg, onClose){
   const ws = new WebSocket(WS_URL);
@@ -1534,13 +1617,20 @@ function connectWS(onOpen, onMsg, onClose){
       if(msg.type==='result')        extra = 'dets='+((msg.dets||[]).length)+' ts='+(msg.ts||'?');
       if(msg.type==='health')        extra = 'cpu='+((msg.h&&msg.h.cpu!=null)?msg.h.cpu:'?')+'%';
       if(msg.type==='client-joined') extra = 'ip='+(msg.ip||'?');
+      if(msg.type==='client-reconnected') extra = 'ip='+(msg.ip||'?')+' reconnect=1';
       if(msg.type==='error')         extra = 'msg='+(msg.msg||'?');
       const rxBytes = ev.data ? ev.data.length : 0;
       const status  = msg.type==='error' ? 'FAIL' : 'RECV';
       NET.logPacket('RX', msg.type, rxBytes, sched, device, status, extra);
     }catch(e){ /* logging must never crash the app */ }
   };
-  ws.onclose   = ()=>{ console.log('[WS] closed'); try{ NET.logPacket('RX','ws-close',0,'','','DROP','connection_closed'); }catch(e){} onClose(); };
+  ws.onclose   = ()=>{
+    if(S.ws !== ws) return; // superseded by a newer socket — ignore
+    console.log('[WS] closed');
+    try{ NET.logPacket('RX','ws-close',0,'','','DROP','connection_closed'); }catch(e){}
+    onClose();
+    scheduleReconnect();
+  };
   ws.onerror   = e =>{ console.error('[WS] error',e); try{ NET.logPacket('TX','ws-error',0,'','','FAIL','WS connection error'); }catch(e2){} };
   return ws;
 }
@@ -1585,6 +1675,7 @@ function _wsReconnectServer(){
   if(!S.code || !S.myId) return;
   connectWS(
     (ws)=>{
+      clearReconnectState();
       startWSPing();
       wsSend({ type:'host-create', code:S.code, clientId:S.myId });
     },
@@ -1596,15 +1687,16 @@ function _wsReconnectServer(){
         // Restart capture if camera was running
         if(S.stream && !S.capTimer) startCapture();
       }
-      if(msg.type==='client-joined') onClientJoined(msg.clientId, msg.ip, msg.deviceInfo);
-      if(msg.type==='client-left')   onClientDrop(msg.clientId);
-      if(msg.type==='result')        onClientResult(msg.from, msg);
-      if(msg.type==='health')        onClientHealth(msg.from, msg.h);
-      if(msg.type==='sched-result')  onClientSchedResult(msg.from, msg.data);
+      if(msg.type==='client-joined')      onClientJoined(msg.clientId, msg.ip, msg.deviceInfo);
+      if(msg.type==='client-reconnected') onClientReconnect(msg.clientId, msg.ip, msg.deviceInfo);
+      if(msg.type==='client-left')        onClientDrop(msg.clientId);
+      if(msg.type==='result')             onClientResult(msg.from, msg);
+      if(msg.type==='health')             onClientHealth(msg.from, msg.h);
+      if(msg.type==='sched-result')       onClientSchedResult(msg.from, msg.data);
     },
     ()=>{
       $('sDot').className='dot r';
-      setStatus('s','Server disconnected — tap ↺ to reconnect','r');
+      setStatus('s','Server disconnected — reconnecting…','r');
     }
   );
 }
@@ -1613,24 +1705,27 @@ function _wsReconnectClient(){
   if(!S.code || !S.myId) return;
   connectWS(
     ()=>{
+      clearReconnectState();
       startWSPing();
-      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: S.deviceName || getDeviceInfo() } });
+      wsSend({
+        type:'client-join', code:S.code, clientId:S.myId,
+        data:{ deviceInfo: S.deviceName || getDeviceInfo(), previousClientId: S.myId }
+      });
     },
     (msg)=>{
       if(msg.type==='joined'){
         $('cDot').className='dot g';
         setStatus('c','Reconnected — receiving frames','g');
-        toast('Reconnected!');
+        toast(msg.reconnected ? 'Reconnected (session restored)!' : 'Reconnected!');
       }
       if(msg.type==='error'){ toast(msg.msg||'Reconnect error'); setStatus('c',msg.msg||'Error','r'); }
       if(msg.type==='frame')     handleFrame(msg);
       if(msg.type==='exp-reset') clientExperimentReset((msg.data && msg.data.expId) || 0);
-      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
+      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); clearReconnectState(); }
     },
     ()=>{
       $('cDot').className='dot r';
-      setStatus('c','Disconnected — tap ↺ to retry','r');
-      resetJoin(); $('discBtn').style.display='none';
+      setStatus('c','Disconnected — reconnecting…','r');
     }
   );
 }
@@ -1641,11 +1736,14 @@ function _wsReconnectClient(){
 function initServer(){
   S.myId = 'host-'+uid();
   S.code = genCode();
+  S._suppressReconnect = false;
+  S._nextTs = Date.now();
   RES.hostReset();
   setStatus('s','Connecting to server...','b');
 
   connectWS(
     (ws)=>{
+      clearReconnectState();
       startWSPing();
       requestWakeLock();
       wsSend({ type:'host-create', code:S.code, clientId:S.myId });
@@ -1660,32 +1758,38 @@ function initServer(){
         setStatus('s','Session live · waiting for clients','g');
         toast('Session ready! Code: '+S.code);
       }
-      if(msg.type==='client-joined') onClientJoined(msg.clientId, msg.ip, msg.deviceInfo);
-      if(msg.type==='client-left')   onClientDrop(msg.clientId);
-      if(msg.type==='result')        onClientResult(msg.from, msg);
-      if(msg.type==='health')        onClientHealth(msg.from, msg.h);
-      if(msg.type==='sched-result')  onClientSchedResult(msg.from, msg.data);
+      if(msg.type==='client-joined')      onClientJoined(msg.clientId, msg.ip, msg.deviceInfo);
+      if(msg.type==='client-reconnected') onClientReconnect(msg.clientId, msg.ip, msg.deviceInfo);
+      if(msg.type==='client-left')        onClientDrop(msg.clientId);
+      if(msg.type==='result')             onClientResult(msg.from, msg);
+      if(msg.type==='health')             onClientHealth(msg.from, msg.h);
+      if(msg.type==='sched-result')       onClientSchedResult(msg.from, msg.data);
     },
     ()=>{
       $('sDot').className='dot r';
-      setStatus('s','Server disconnected — tap ↺ to reconnect','r');
+      setStatus('s','Server disconnected — reconnecting…','r');
     }
   );
 }
 
 function onClientJoined(clientId, ip, deviceInfo){
   // Guard: if this is a host-reconnect re-announcement (deviceInfo='(reconnected)')
-  // and the client is already tracked, just silently refresh the WS reference — no UI change.
+  // and the client is already tracked, just silently refresh — no UI change.
   if(deviceInfo === '(reconnected)' && S.clients[clientId]){
-    return; // client already in state, nothing to do
+    return;
+  }
+
+  // Same clientId recently left → treat as CLIENT_RECONNECT
+  if(S.leftClients[clientId] || S.clients[clientId]){
+    onClientReconnect(clientId, ip, deviceInfo);
+    return;
   }
 
   const n = Object.keys(S.clients).length+1;
-  // Build display name: device info + IP if available, else fallback to "Client N"
   const ipTag  = ip       ? ' ['+ip+']'       : '';
   const devTag = (deviceInfo && deviceInfo !== '(reconnected)') ? deviceInfo : ('Client '+n);
   const name   = devTag + ipTag;
-  const short  = ip ? ip.split('.').pop() : String(n); // avatar text: last IP octet or number
+  const short  = ip ? ip.split('.').pop() : String(n);
 
   S.clients[clientId]={
     name: name,
@@ -1693,6 +1797,8 @@ function onClientJoined(clientId, ip, deviceInfo){
     health:{battery:100,cpu:50,throughput:50,fps:0},
     frames:0, dets:0, lats:[], pend:0,
     dispatchedFrames:0,
+    frameQuota: S.defaultFrameQuota || 0,
+    powerW: lookupDevicePowerW(devTag),
     schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
     tsMap:{}
   };
@@ -1701,10 +1807,68 @@ function onClientJoined(clientId, ip, deviceInfo){
   const totalNow = Object.keys(S.clients).length;
   toast('\uD83D\uDCF1 '+name+' joined \u2014 '+totalNow+' client(s) connected', 3500);
   setStatus('s',totalNow+' client(s) connected','g');
-  console.log('[CLIENT_JOINED] '+name+' | ip='+( ip||'?')+' | totalClients='+totalNow);
-  LOG.event('CLIENT_JOINED', { clientId: clientId, name: name, ip: ip||'?', device: deviceInfo||'?', totalClients: totalNow });
+  console.log('[CLIENT_JOINED] '+name+' | ip='+( ip||'?')+' | totalClients='+totalNow+' | powerW='+S.clients[clientId].powerW);
+  LOG.event('CLIENT_JOINED', { clientId: clientId, name: name, ip: ip||'?', device: deviceInfo||'?', powerW: S.clients[clientId].powerW, totalClients: totalNow });
 
-  // Retransmit any frames that were queued while no clients were connected
+  const flushed = flushOrphanFrames();
+  if(flushed > 0){
+    toast('Retransmitted '+flushed+' pending frame(s) to '+name, 3000);
+    updateFrameDistUI();
+  }
+}
+
+function onClientReconnect(clientId, ip, deviceInfo){
+  const snap = S.leftClients[clientId];
+  delete S.leftClients[clientId];
+
+  if(S.clients[clientId]){
+    // Still in map (WS replaced before host processed leave) — keep metrics
+    LOG.event('CLIENT_RECONNECT', { clientId: clientId, name: S.clients[clientId].name, restored: 'inplace' });
+    console.log('[CLIENT_RECONNECT] '+S.clients[clientId].name+' (inplace)');
+    toast('\uD83D\uDD04 '+S.clients[clientId].name+' reconnected', 3000);
+    const flushed = flushOrphanFrames();
+    if(flushed > 0) updateFrameDistUI();
+    return;
+  }
+
+  const n = Object.keys(S.clients).length+1;
+  const ipTag  = ip ? ' ['+ip+']' : '';
+  const devTag = (deviceInfo && deviceInfo !== '(reconnected)') ? deviceInfo : ((snap && snap.name) || ('Client '+n));
+  const name   = snap ? snap.name : (devTag + ipTag);
+  const short  = snap ? snap.short : (ip ? ip.split('.').pop() : String(n));
+
+  // Restore prior metrics / counters so frame IDs and results stay consistent
+  S.clients[clientId] = {
+    name: name,
+    short: short,
+    health: (snap && snap.health) || {battery:100,cpu:50,throughput:50,fps:0},
+    frames: (snap && snap.frames) || 0,
+    dets:   (snap && snap.dets) || 0,
+    lats:   (snap && snap.lats) ? snap.lats.slice() : [],
+    pend: 0,
+    dispatchedFrames: (snap && snap.dispatchedFrames) || 0,
+    frameQuota: (snap && snap.frameQuota != null) ? snap.frameQuota : (S.defaultFrameQuota || 0),
+    powerW: (snap && snap.powerW) || lookupDevicePowerW(devTag),
+    schedLats: (snap && snap.schedLats) || { greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+    tsMap: {} // pending were already reassigned on leave
+  };
+
+  updateCliCount();
+  if(!$('cli-'+sid(clientId))) addClientUI(clientId);
+  else updateClientUI(clientId);
+  updateFrameDistUI();
+
+  const totalNow = Object.keys(S.clients).length;
+  LOG.event('CLIENT_RECONNECT', {
+    clientId: clientId, name: name,
+    framesProcessed: Math.floor((S.clients[clientId].frames||0)/4),
+    dispatchedFrames: S.clients[clientId].dispatchedFrames,
+    totalClients: totalNow
+  });
+  console.log('[CLIENT_RECONNECT] '+name+' | restored frames='+S.clients[clientId].dispatchedFrames);
+  toast('\uD83D\uDD04 '+name+' reconnected — state restored', 3500);
+  setStatus('s',totalNow+' client(s) connected','g');
+
   const flushed = flushOrphanFrames();
   if(flushed > 0){
     toast('Retransmitted '+flushed+' pending frame(s) to '+name, 3000);
@@ -1716,19 +1880,24 @@ function onClientJoined(clientId, ip, deviceInfo){
 // (caller should queue it). Never discards the frame.
 function sendPendingFrame(frame, meta){
   if(!frame || !frame.jpg) return false;
-  const cids = Object.keys(S.clients);
+  const cids = eligibleClients();
   if(!cids.length) return false;
 
   const id = cids.length === 1 ? cids[0] : pickClientForSched(frame.sched);
   const target = id ? S.clients[id] : null;
   if(!target) return false;
 
-  let newTs = (sendPendingFrame._tsBase = (sendPendingFrame._tsBase || Date.now()) + 1);
-  while(target.tsMap[newTs]) newTs = ++sendPendingFrame._tsBase;
+  let newTs = nextFrameTs();
+  while(target.tsMap[newTs]) newTs = nextFrameTs();
   target.tsMap[newTs] = { sched: frame.sched, jpg: frame.jpg, fw: frame.fw, fh: frame.fh };
   target.pend = (target.pend||0) + 1;
   target.dispatchedFrames = (target.dispatchedFrames||0) + 1;
-  wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg:frame.jpg, fw:frame.fw, fh:frame.fh, ts:newTs, sched:frame.sched } });
+  if(!wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg:frame.jpg, fw:frame.fw, fh:frame.fh, ts:newTs, sched:frame.sched } })){
+    delete target.tsMap[newTs];
+    target.pend = Math.max(0, (target.pend||1)-1);
+    target.dispatchedFrames = Math.max(0, (target.dispatchedFrames||1)-1);
+    return false;
+  }
   LOG.event('FRAME_REASSIGN', {
     from: (meta && meta.from) || '?', fromId: (meta && meta.fromId) || '?',
     to: target.name||id, toId: id,
@@ -1780,6 +1949,24 @@ function onClientDrop(clientId){
   LOG.event('CLIENT_LEFT', { clientId: clientId, name: name, framesProcessed: framesProcessed, pendingFrames: pending.length });
   console.log('[CLIENT_LEFT] '+name+' | framesProcessed='+framesProcessed+' | pending='+pending.length+' | remaining='+(Object.keys(S.clients).length-1));
 
+  // Snapshot metrics so CLIENT_RECONNECT can restore state (and avoid frame-ID collisions)
+  if(cli){
+    S.leftClients[clientId] = {
+      name: cli.name, short: cli.short, health: {...(cli.health||{})},
+      frames: cli.frames, dets: cli.dets, lats: (cli.lats||[]).slice(),
+      dispatchedFrames: cli.dispatchedFrames || 0,
+      frameQuota: cli.frameQuota || 0,
+      powerW: cli.powerW || lookupDevicePowerW(cli.name),
+      schedLats: {
+        greedy: (cli.schedLats.greedy||[]).slice(),
+        pso: (cli.schedLats.pso||[]).slice(),
+        mompso: (cli.schedLats.mompso||[]).slice(),
+        'mompso-ga': (cli.schedLats['mompso-ga']||[]).slice()
+      },
+      leftAt: Date.now()
+    };
+  }
+
   delete S.clients[clientId];
   updateCliCount();
   $('cli-'+sid(clientId))?.remove();
@@ -1829,9 +2016,8 @@ function onClientResult(clientId, msg){
   // Track successful return in LOG analytics
   LOG.trackResult(clientId, sched);
 
-  // Track energy on the HOST side (same formula as the client: POWER_W × latency_s / 1000)
-  // This is what populates the energy table in the exported summary.
-  const frameEnergy = (POWER_W * (lat / 1000)) / 1000; // KJ
+  // Track energy using device power model (not Battery API — that has no wattage)
+  const frameEnergy = calcFrameEnergyKJ(lat, cli.name);
   LOG.trackEnergy(clientId, cli.name, sched, frameEnergy);
 
   // Per-frame structured log
@@ -1920,8 +2106,18 @@ function renderFinalResults(){
       found = true;
     });
     if(!found) return;
+    // Mean device power across clients that contributed to this scheduler
+    let sumW=0, wCount=0;
+    cids.forEach(function(cid){
+      const c=S.clients[cid];
+      if(c.schedLats[sched] && c.schedLats[sched].length){
+        sumW += c.powerW || lookupDevicePowerW(c.name);
+        wCount++;
+      }
+    });
+    const avgW = wCount ? sumW/wCount : DEFAULT_PHONE_W;
     const avgTime   = sumLat/1000;
-    const avgEnergy = (POWER_W * avgTime) / 1000;
+    const avgEnergy = (avgW * avgTime) / 1000;
     totTime   += avgTime;
     totLat    += sumLat;
     totEnergy += avgEnergy;
@@ -2000,8 +2196,19 @@ function schedGA(cids){
   return cids[diffs.indexOf(Math.min(...diffs))];
 }
 
+function clientUnderQuota(cli){
+  if(!cli) return false;
+  const q = cli.frameQuota || S.defaultFrameQuota || 0;
+  if(q <= 0) return true; // unlimited
+  return (cli.dispatchedFrames || 0) < q;
+}
+
+function eligibleClients(){
+  return Object.keys(S.clients).filter(id => clientUnderQuota(S.clients[id]));
+}
+
 function pickClientForSched(sched){
-  const cids=Object.keys(S.clients);
+  const cids=eligibleClients();
   if(!cids.length) return null;
   switch(sched){
     case 'greedy':    return schedGreedy(cids);
@@ -2012,21 +2219,42 @@ function pickClientForSched(sched){
   }
 }
 
+function applyGlobalFrameQuota(){
+  const inp = $('frameQuotaInp');
+  const q = Math.max(0, parseInt(inp && inp.value, 10) || 0);
+  S.defaultFrameQuota = q;
+  Object.keys(S.clients).forEach(id=>{ S.clients[id].frameQuota = q; });
+  toast(q ? 'Quota set: '+q+' frames per client' : 'Quota unlimited (scheduler decides)');
+  LOG.event('FRAME_QUOTA', { quota: q, clients: Object.keys(S.clients).length });
+  updateFrameDistUI();
+}
+
 // Dispatch one frame per scheduler — all 4 run simultaneously
 // S.sent counts VIDEO FRAMES dispatched (not WS messages)
 function dispatch(jpg,fw,fh){
-  const cids=Object.keys(S.clients);
+  const cids=eligibleClients();
   if(!cids.length) return;
+  // Socket must be open — never enqueue frames into a dead channel
+  if(!S.ws || S.ws.readyState !== WebSocket.OPEN){
+    console.warn('[dispatch] WS not open — skipping frame');
+    return;
+  }
   const frameIndex = S.sent + 1; // 1-based frame number for this experiment
   const pickedThisFrame = new Set();
   SCHEDS.forEach(sched=>{
     const id = cids.length===1 ? cids[0] : pickClientForSched(sched);
     if(!id) return;
-    const ts=Date.now();
+    // Re-check quota after earlier schedulers may have claimed this client
+    if(!clientUnderQuota(S.clients[id])) return;
+    const ts = nextFrameTs();
     const cli = S.clients[id];
     // Retain payload so pending frames can be retransmitted if this client disconnects
     if(cli) cli.tsMap[ts]={ sched, jpg, fw, fh };
-    wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } });
+    if(!wsSend({ type:'frame', code:S.code, clientId:S.myId, data:{ to:id, jpg, fw, fh, ts, sched } })){
+      if(cli) delete cli.tsMap[ts];
+      console.warn('[dispatch] send failed sched='+sched+' to='+id);
+      return;
+    }
     if(cli) cli.pend=(cli.pend||0)+1;
     S.schedSent[sched]=(S.schedSent[sched]||0)+1;
     S.dispatched++; // one WS message per scheduler per frame
@@ -2052,8 +2280,10 @@ function dispatch(jpg,fw,fh){
   });
   // count unique video frames per client (not per scheduler)
   pickedThisFrame.forEach(id=>{ if(S.clients[id]) S.clients[id].dispatchedFrames++; });
-  S.sent++;
-  $('sFrSent').textContent=S.sent;
+  if(pickedThisFrame.size){
+    S.sent++;
+    $('sFrSent').textContent=S.sent;
+  }
 }
 
 // ── SERVER RESULTS ────────────────────────────────────────────────
@@ -2140,16 +2370,25 @@ function joinSession(){
   $('joinBtn').disabled=true; $('joinBtn').textContent='Connecting...';
   $('cDot').className='dot b'; setStatus('c','Connecting to server...','b');
 
-  S.myId = 'cli-'+uid();
+  // Reuse prior clientId for this session code so host can CLIENT_RECONNECT
+  const storageKey = 'dn_clientId_'+code;
+  const prevId = sessionStorage.getItem(storageKey);
+  S.myId = prevId || ('cli-'+uid());
+  sessionStorage.setItem(storageKey, S.myId);
   S.code = code;
+  S._suppressReconnect = false;
   RES.clientReset();
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
 
   connectWS(
     ()=>{
+      clearReconnectState();
       startWSPing();
       requestWakeLock();
-      wsSend({ type:'client-join', code:S.code, clientId:S.myId, data:{ deviceInfo: S.deviceName || getDeviceInfo() } });
+      wsSend({
+        type:'client-join', code:S.code, clientId:S.myId,
+        data:{ deviceInfo: S.deviceName || getDeviceInfo(), previousClientId: prevId || S.myId }
+      });
     },
     (msg)=>{
       console.log('[Client] msg:', msg.type);
@@ -2162,8 +2401,8 @@ function joinSession(){
         $('cDetSec').style.display='block';
         $('cNetCard').style.display='block';
         S.cliStart=Date.now(); S.cliEnergySum=0;
-        setStatus('c','Connected — receiving frames','g');
-        toast('Connected! Waiting for frames...');
+        setStatus('c', msg.reconnected ? 'Reconnected — receiving frames' : 'Connected — receiving frames','g');
+        toast(msg.reconnected ? 'Reconnected! Session state restored' : 'Connected! Waiting for frames...');
         updateHealth();
       }
       if(msg.type==='error'){
@@ -2172,19 +2411,19 @@ function joinSession(){
       }
       if(msg.type==='frame')     handleFrame(msg);
       if(msg.type==='exp-reset') clientExperimentReset((msg.data && msg.data.expId) || 0);
-      if(msg.type==='host-left'){ $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
+      if(msg.type==='host-left'){ S._suppressReconnect=true; clearReconnectState(); $('cDot').className='dot r'; setStatus('c','Host ended session','r'); resetJoin(); $('discBtn').style.display='none'; sendSchedResults(); }
     },
     ()=>{
       $('cDot').className='dot r';
-      setStatus('c','Disconnected — tap ↺ to retry','r');
-      resetJoin(); $('discBtn').style.display='none';
-      sendSchedResults();
+      setStatus('c','Disconnected — reconnecting…','r');
     }
   );
 }
 
 function disconnectClient(){
   // Send results FIRST while WS is still open, then close after a tick
+  S._suppressReconnect = true;
+  clearReconnectState();
   sendSchedResults();
   clearInterval(S.healthTimer);
   releaseWakeLock();
@@ -2230,10 +2469,9 @@ async function handleFrame(data){
     }
     const detectMs = Date.now() - detectStart;
 
-    // ── Per-frame metrics ─────────────────────────────────────
+    // ── Per-frame metrics (device power model, not Battery API) ─
     const lat         = Date.now()-data.ts;          // ms
-    const frameTime   = lat/1000;                    // seconds
-    const frameEnergy = (POWER_W*frameTime)/1000;    // KJ
+    const frameEnergy = calcFrameEnergyKJ(lat, S.deviceName || getDeviceInfo());
 
     // Accumulate into per-scheduler buckets (via RES module)
     RES.clientFrame(sched, lat, frameEnergy);
@@ -2254,6 +2492,7 @@ async function handleFrame(data){
       dets:     dets.length,
       classes:  dets.slice(0,4).map(d=>d.class).join(',') || 'none',
       energyKJ: frameEnergy.toFixed(8),
+      powerW:   lookupDevicePowerW(S.deviceName || getDeviceInfo()),
       ts:       data.ts
     });
 
@@ -2278,8 +2517,7 @@ async function handleFrame(data){
       data:{ ts:data.ts, fw:img.width, fh:img.height, sched,
              dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
 
-    // Send per-scheduler averages to host on every frame so table updates live
-    sendSchedResults();
+    // Health + sched averages sent on fixed interval — not every frame
   };
   img.src=data.jpg;
 }
@@ -2293,7 +2531,10 @@ function renderCliDets(dets){
 //  HEALTH
 // ══════════════════════════════════════════════════════════════════
 const HD = {
-  battery: -1, cpu: 50, memory: 50, throughput: 50, fps: 0, network: -1, batterySupported: false,
+  battery: -1, cpu: 50, memory: 50, throughput: 50, fps: 0,
+  network: -1,          // coarse downlink estimate (Mbps) — display only
+  networkType: '',      // effectiveType: 4g/3g/2g
+  batterySupported: false,
 };
 
 async function initBattery(){
@@ -2331,13 +2572,18 @@ function measureMemory(){
 }
 
 function measureNetwork(){
+  // navigator.connection.downlink is coarse (0.5/1/2/10 Mbps) and rarely updates.
+  // Prefer measured end-to-end latency for the health SCORE; keep downlink as labeled estimate only.
   const nc=navigator.connection||navigator.mozConnection||navigator.webkitConnection;
   if(nc){
-    if(nc.downlink && nc.downlink>0){ HD.network=nc.downlink; HD.throughput=Math.min(100,Math.round(nc.downlink/10*100)); return; }
-    const map={'4g':85,'3g':50,'2g':25,'slow-2g':10};
-    if(nc.effectiveType){ HD.throughput=map[nc.effectiveType]||50; return; }
+    HD.networkType = nc.effectiveType || '';
+    HD.network = (nc.downlink && nc.downlink > 0) ? nc.downlink : -1;
+  } else {
+    HD.networkType = '';
+    HD.network = -1;
   }
   const al=S.cliLats.length?S.cliLats.slice(-5).reduce((a,b)=>a+b,0)/Math.min(S.cliLats.length,5):100;
+  // Latency-derived throughput score (0–100) — more useful for scheduling than downlink buckets
   HD.throughput=Math.round(Math.max(5,Math.min(100,100-al/10)));
 }
 
@@ -2362,20 +2608,30 @@ async function updateHealth(){
   measureCPU_sync(); measureMemory(); measureNetwork(); measureFPS();
   renderHealth();
   wsSend({ type:'health', code:S.code, clientId:S.myId, data:{ h:{...HD} } });
+  // Piggyback sched averages on the same fixed interval (decoupled from frame rate)
+  if(S.frDone > 0) sendSchedResults();
 }
 
 function startHealthReporting(){
   initBattery();
   requestAnimationFrame(measureCPU);
   updateHealth();
-  S.healthTimer=setInterval(updateHealth,3000);
+  S.healthTimer=setInterval(updateHealth, HEALTH_MS);
 }
 
 function renderHealth(){
   const batVal  = HD.batterySupported ? HD.battery : null;
   const batDisp = batVal!==null ? batVal+'%' : 'N/A';
   const batBar  = batVal!==null ? batVal : 0;
-  const netDisp = HD.network>=0 ? HD.network.toFixed(1)+' Mbps' : HD.throughput+'%';
+  // Label downlink as coarse estimate; prefer effectiveType + RTT-derived score
+  let netDisp;
+  if(HD.networkType){
+    netDisp = HD.networkType.toUpperCase() + (HD.network>=0 ? ' ~'+HD.network.toFixed(1)+'Mbps*' : '');
+  } else if(HD.network>=0){
+    netDisp = '~'+HD.network.toFixed(1)+' Mbps*';
+  } else {
+    netDisp = HD.throughput+'% (RTT)';
+  }
   const rows=[
     { lbl:'Battery',  val:batBar,          disp:batDisp,                    c:'var(--acc)',  na:batVal===null },
     { lbl:'CPU free', val:100-HD.cpu,      disp:(100-HD.cpu)+'%',           c:'var(--blue)' },
@@ -2390,8 +2646,9 @@ function renderHealth(){
     <div class="hbrow">
       <div class="hbl" style="width:60px;font-size:9px">${r.lbl}</div>
       <div class="hbt">${r.na?`<div class="hb" style="width:0%;background:var(--txt3)"></div>`:`<div class="hb" style="width:${Math.min(100,Math.max(0,r.val))}%;background:${r.c}"></div>`}</div>
-      <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);width:42px;text-align:right;margin-left:4px">${r.na?'<span style="color:var(--txt3)">N/A</span>':r.disp}</div>
-    </div>`).join('');
+      <div style="font-size:9px;font-family:var(--mono);color:var(--txt3);width:72px;text-align:right;margin-left:4px">${r.na?'<span style="color:var(--txt3)">N/A</span>':r.disp}</div>
+    </div>`).join('')
+    +'<div style="font-size:8px;font-family:var(--mono);color:var(--txt3);margin-top:4px">* downlink is a coarse browser estimate, not measured throughput</div>';
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2691,9 +2948,13 @@ function updateFrameDistUI(){
   list.innerHTML = cids.map(function(id){
     const cli = S.clients[id];
     const f = Math.floor(cli.frames / 4);
+    const disp = cli.dispatchedFrames || 0;
+    const q = cli.frameQuota || S.defaultFrameQuota || 0;
+    const qLabel = q > 0 ? (' / '+q+' quota') : '';
+    const capped = q > 0 && disp >= q;
     return '<div style="display:flex;justify-content:space-between;padding:7px 0;border-bottom:1px solid var(--bord)">'
-      +'<span style="font-size:13px;font-weight:700;color:var(--txt)">'+cli.name+'</span>'
-      +'<span style="font-size:13px;font-family:var(--mono);color:var(--acc);font-weight:700">'+f+' frames</span>'
+      +'<span style="font-size:13px;font-weight:700;color:var(--txt)">'+cli.name+(capped?' <span style="color:var(--amb);font-size:10px">CAP</span>':'')+'</span>'
+      +'<span style="font-size:13px;font-family:var(--mono);color:var(--acc);font-weight:700">'+f+' done · '+disp+' sent'+qLabel+'</span>'
       +'</div>';
   }).join('');
 }

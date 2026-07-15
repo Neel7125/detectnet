@@ -47,9 +47,10 @@ All four schedulers run **simultaneously** on every frame batch. Each one indepe
 |--------|--------|----------|
 | Battery | Battery Status API (Android Chrome) | N/A on iOS |
 | CPU free | requestAnimationFrame jank detector | Works everywhere |
-| Network | `navigator.connection.downlink` (Mbps) | Latency-derived |
+| Network | Measured frame RTT (score) + `effectiveType` | Coarse `downlink` shown as estimate only |
 | FPS | Detection frames / elapsed seconds | Real data always |
 | Mem free | `performance.memory` heap ratio | Fixed 50% on iOS |
+| Energy | Device power-model table × inference time | Lookup by device name / UA |
 
 ---
 
@@ -114,8 +115,8 @@ The `server.js` relay needs a persistent Node.js host. Vercel serverless doesn't
 - **Frontend** — Vanilla JS, HTML5, CSS (no framework)
 - **AI Model** — TensorFlow.js + COCO-SSD (80 object classes, runs fully on-device)
 - **Transport** — WebSocket (`ws` library)
-- **Signaling** — Vercel Serverless Functions + Upstash Redis
-- **Hosting** — Vercel (frontend/API) + Railway or Render (WS server)
+- **Signaling** — WebSocket relay (`server.js`). Legacy HTTP `/api/signal` requires Upstash Redis (no in-memory fallback).
+- **Hosting** — Vercel (frontend) + Railway or Render (WS server)
 - **Node.js** — v18+
 
 ---
