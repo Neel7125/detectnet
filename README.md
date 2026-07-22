@@ -28,8 +28,10 @@ All frames, packets, and energy consumption are logged with Wireshark-style prec
 Export buttons generate `.txt` reports with complete analytics:
 - Success rates (global, per-scheduler, per-device)
 - CPU utilization patterns (which schedulers picked high-load vs low-load devices)
-- Energy consumption matrix (device × scheduler in Kilojoules)
+- Energy consumption matrix (device × scheduler in Kilojoules) — E_total, compute, and network separately
 - Full packet log (seq#, timestamp, direction, type, bytes, scheduler, device, status)
+
+Methodology for energy: [ENERGY_MODEL.md](ENERGY_MODEL.md).
 
 ### Schedulers
 All four schedulers run **simultaneously** on every frame batch. Each one independently decides which client gets which frame based on device health scores.
@@ -45,12 +47,12 @@ All four schedulers run **simultaneously** on every frame batch. Each one indepe
 
 | Metric | Source | Fallback |
 |--------|--------|----------|
-| Battery | Battery Status API (Android Chrome) | N/A on iOS |
+| Battery | Battery Status API (Android Chrome) | N/A on iOS (no calibration) |
 | CPU free | requestAnimationFrame jank detector | Works everywhere |
 | Network | Measured frame RTT (score) + `effectiveType` | Coarse `downlink` shown as estimate only |
 | FPS | Detection frames / elapsed seconds | Real data always |
 | Mem free | `performance.memory` heap ratio | Fixed 50% on iOS |
-| Energy | Device power-model table × inference time | Lookup by device name / UA |
+| Energy | Hybrid: Fan linear compute + tail-energy network (battery-calibrated when available) | See ENERGY_MODEL.md |
 
 ---
 
@@ -64,6 +66,7 @@ detectnet-pro/
 ├── api/
 │   └── signal.js       ← Vercel serverless signaling (in-memory fallback)
 ├── server.js           ← WebSocket SFU relay server (Railway / Render)
+├── ENERGY_MODEL.md     ← Hybrid energy methodology & citations
 ├── vercel.json         ← Vercel routing, headers, function config
 ├── Procfile            ← For Railway / Render deployment
 ├── package.json

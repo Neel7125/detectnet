@@ -300,11 +300,11 @@ After frames are processed, the host renders a comparison table:
 | Scheduler | Algorithm name |
 | Compl. Time (s) | Average completion time = avg latency / 1000 |
 | Latency (ms) | Average round-trip latency across all clients |
-| Energy (KJ) | Device power-model W × completion time / 1000 |
+| Energy (KJ) | E_total = modeled compute + modeled network (see ENERGY_MODEL.md) |
 
 A TOTAL row sums all schedulers. A per-client frame distribution bar shows how many frames each client processed.
 
-The table updates live as results arrive. Energy uses a per-device active-wattage lookup (not the Battery API).
+The table updates live as results arrive. Energy uses the hybrid model: Fan linear utilization over `detectMs` (optionally battery-calibrated) plus a tail-energy network proxy per WebSocket message — not a flat UA wattage × RTT lookup.
 
 > **Note:** The `results.js` file and the `RES` module are present in the codebase but the host currently ignores `sched-result` messages from clients and recomputes everything from raw `result` latency data directly.
 
@@ -329,7 +329,7 @@ All messages are JSON. The server routes them based on `type`.
 | Type | Fields | Description |
 |------|--------|-------------|
 | `client-join` | `code`, `clientId` | Join a session |
-| `result` | `data.ts`, `data.dets`, `data.fw`, `data.fh`, `data.sched` | Send detection results to host |
+| `result` | `data.ts`, `data.dets`, `data.fw`, `data.fh`, `data.sched`, `data.energy` | Send detection results + hybrid energy breakdown to host |
 | `sched-result` | `data` | Send per-scheduler averages to host |
 | `health` | `data.h` | Send health metrics to host |
 | `ping` | — | Keepalive |
@@ -357,8 +357,9 @@ Constants in `public/index.html`:
 | Constant | Default | Description |
 |----------|---------|-------------|
 | `WS_URL` | Render/Fly.io URL | WebSocket relay server address |
-| `DEVICE_POWER_TABLE` | UA/name lookups | Active wattage per device class for energy (KJ) |
-| `DEFAULT_PHONE_W` | `4.0` | Fallback active watts when device is unknown |
+| `DEVICE_POWER_TABLE` | UA/name lookups | Prior idleW / maxW / capacityWh for hybrid energy model |
+| `DEFAULT_PHONE_IDLE_W` / `MAX_W` | `1.4` / `4.6` | Fallback Fan-model priors when device is unknown |
+| `RADIO_TAIL` | wifi/cell/other | Tail-energy Joules + tail window (IMC 2009 proxy) |
 | `HEALTH_MS` | `2000` | Fixed health + sched-result interval (decoupled from frames) |
 | `CAPTURE_MS` | `220` | Frame capture interval in milliseconds (~4.5 fps) |
 | `RESMAP` | 240/480/720p | Resolution presets for live camera |
@@ -381,9 +382,9 @@ Constants in `public/index.html`:
 
 ## Known Limitations
 
-**Energy is model-based.** Wattage comes from a device lookup table (name/UA → active W), not from the Battery Status API (which has no power reading). Values are defensible for relative scheduler comparisons but are not lab-grade calorimetry.
+**Energy is a hybrid model (not lab calorimetry).** Compute uses Fan et al.’s linear utilization law over the isolated `detectMs` window; network uses a Balasubramanian-style tail-energy proxy per WebSocket message; Battery Status API drain (when available) scales `P_idle`/`P_max` PowerTutor-style. See [ENERGY_MODEL.md](ENERGY_MODEL.md). Values are defensible for relative scheduler comparisons.
 
-**Battery unavailable on iOS.** The Battery Status API is not supported on iOS Safari. Battery is excluded from health scoring on those devices.
+**Battery unavailable on iOS.** The Battery Status API is not supported on iOS Safari. Battery is excluded from health scoring and energy calibration on those devices; compute/network priors still apply.
 
 **`navigator.connection.downlink` is coarse.** It returns rounded buckets (0.5/1/2/10 Mbps) and is labeled as an estimate. Scheduling uses RTT-derived throughput instead.
 

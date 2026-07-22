@@ -109,14 +109,14 @@ LOG.trackEnergy(deviceId, name, sched, energyKJ)
   └──────────────────────────────────────────────────────────────────────────────────────────
 ```
 
-**Calculation:**
-- `frameTime = latency_ms / 1000` (seconds)
-- `energyKJ = (15 watts × frameTime) / 1000`
-- Accumulated per device per scheduler
-- Exported as matrix: rows=devices, columns=schedulers
+**Calculation (current — see ENERGY_MODEL.md):**
+- `E_compute = [P_idle + (P_max−P_idle)×cpuUtil] × detectMs/1000` (Fan / PureEdgeSim)
+- `E_network` = tail-energy proxy per WS message (Balasubramanian IMC 2009)
+- `E_total = E_compute + E_network` — accumulated per device × scheduler
+- Battery Status API drain (when available) calibrates `P_idle`/`P_max` (PowerTutor-style)
 
 **Note on Energy Accuracy:**
-Energy values are **approximate** — based on fixed 15W assumption. Actual device power varies by hardware, screen, network activity, CPU load.
+Energy values are **modeled** (optionally battery-anchored), not Monsoon-class calorimetry. Export labels distinguish compute vs network so claims stay reviewable. Full methodology: [ENERGY_MODEL.md](ENERGY_MODEL.md).
 
 ---
 

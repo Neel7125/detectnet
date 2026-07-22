@@ -1,30 +1,46 @@
 // ================================================================
 //  results.js — Standalone result tracking & rendering
-//  Client side : call RES.clientFrame(sched, latMs, energyKJ)
+//  Client side : call RES.clientFrame(sched, latMs, energyOrObj)
 //                call RES.clientSend(ws, code, myId)
 //  Host side   : call RES.hostReceive(clientId, data)
 //                call RES.hostRender()
+//  Note: DetectNet ships an inline copy in index.html (Vercel rewrite
+//  constraint). Keep both in sync. Energy is E_total = compute + network.
 // ================================================================
 
 var RES = (function() {
 
   // ── CLIENT STATE ─────────────────────────────────────────────
-  // schedData[sched] = { lats:[], energySum:0, frames:0 }
+  // schedData[sched] = { lats:[], energySum, computeSum, networkSum, frames }
   var schedData = {};
   var SCHEDS = ['greedy','pso','mompso','mompso-ga'];
+
+  function _empty(){ return { lats: [], energySum: 0, computeSum: 0, networkSum: 0, frames: 0 }; }
 
   function clientReset() {
     schedData = {};
     SCHEDS.forEach(function(s) {
-      schedData[s] = { lats: [], energySum: 0, frames: 0 };
+      schedData[s] = _empty();
     });
   }
 
-  // Called after every frame is processed on the client
-  function clientFrame(sched, latMs, energyKJ) {
-    if (!schedData[sched]) schedData[sched] = { lats: [], energySum: 0, frames: 0 };
+  // energyOrObj = number (legacy total KJ) OR { totalKJ, computeKJ, networkKJ }
+  function clientFrame(sched, latMs, energyOrObj) {
+    if (!schedData[sched]) schedData[sched] = _empty();
     schedData[sched].lats.push(latMs);
-    schedData[sched].energySum += energyKJ;
+    var total = 0, compute = 0, network = 0;
+    if (energyOrObj && typeof energyOrObj === 'object') {
+      total   = +energyOrObj.totalKJ   || 0;
+      compute = +energyOrObj.computeKJ || 0;
+      network = +energyOrObj.networkKJ || 0;
+      if (!total && (compute || network)) total = compute + network;
+    } else {
+      total = +energyOrObj || 0;
+      compute = total;
+    }
+    schedData[sched].energySum  += total;
+    schedData[sched].computeSum += compute;
+    schedData[sched].networkSum += network;
     schedData[sched].frames++;
   }
 
@@ -38,10 +54,15 @@ var RES = (function() {
       if (!d || d.frames === 0) return;
       var sumLat = 0;
       for (var i = 0; i < d.lats.length; i++) sumLat += d.lats[i];
-      var avgLat    = sumLat / d.lats.length;
-      var avgTime   = avgLat / 1000;
-      var avgEnergy = d.energySum / d.frames;
-      payload[sched] = { avgLat: avgLat, avgTime: avgTime, avgEnergy: avgEnergy, frames: d.frames };
+      var avgLat = sumLat / d.lats.length;
+      payload[sched] = {
+        avgLat: avgLat,
+        avgTime: avgLat / 1000,
+        avgEnergy: d.energySum / d.frames,
+        avgCompute: d.computeSum / d.frames,
+        avgNetwork: d.networkSum / d.frames,
+        frames: d.frames
+      };
       hasAny = true;
     });
     if (!hasAny) return;
@@ -50,7 +71,7 @@ var RES = (function() {
   }
 
   // ── HOST STATE ───────────────────────────────────────────────
-  // clientResults[clientId][sched] = { avgLat, avgTime, avgEnergy, frames }
+  // clientResults[clientId][sched] = { avgLat, avgTime, avgEnergy, avgCompute, avgNetwork, frames }
   var clientResults = {};
 
   function hostReset() {
@@ -77,16 +98,18 @@ var RES = (function() {
     var COLORS = { greedy:'g',      pso:'b',   mompso:'p',       'mompso-ga':'a' };
 
     var html = '';
-    var totTime = 0, totLat = 0, totEnergy = 0, schedCount = 0;
+    var totTime = 0, totLat = 0, totEnergy = 0, totCompute = 0, totNetwork = 0, schedCount = 0;
 
     SCHEDS.forEach(function(sched) {
-      var sumTime = 0, sumLat = 0, sumEnergy = 0, found = false;
+      var sumTime = 0, sumLat = 0, sumEnergy = 0, sumCompute = 0, sumNetwork = 0, found = false;
       ids.forEach(function(cid) {
         var d = clientResults[cid] && clientResults[cid][sched];
         if (d && d.frames > 0) {
-          sumTime   += d.avgTime;
-          sumLat    += d.avgLat;
-          sumEnergy += d.avgEnergy;
+          sumTime    += d.avgTime;
+          sumLat     += d.avgLat;
+          sumEnergy  += d.avgEnergy;
+          sumCompute += (d.avgCompute != null ? d.avgCompute : d.avgEnergy);
+          sumNetwork += (d.avgNetwork != null ? d.avgNetwork : 0);
           found = true;
         }
       });
@@ -94,12 +117,14 @@ var RES = (function() {
       totTime   += sumTime;
       totLat    += sumLat;
       totEnergy += sumEnergy;
+      totCompute += sumCompute;
+      totNetwork += sumNetwork;
       schedCount++;
       html += '<tr>'
         + '<td class="' + COLORS[sched] + '">' + NAMES[sched] + '</td>'
         + '<td class="bld">' + sumTime.toFixed(4) + 's</td>'
         + '<td>' + sumLat.toFixed(1) + 'ms</td>'
-        + '<td>' + sumEnergy.toFixed(6) + 'KJ</td>'
+        + '<td title="compute ' + sumCompute.toFixed(6) + ' + network ' + sumNetwork.toFixed(6) + '">' + sumEnergy.toFixed(6) + 'KJ</td>'
         + '</tr>';
     });
 
@@ -109,11 +134,11 @@ var RES = (function() {
       + '<td>TOTAL</td>'
       + '<td>' + totTime.toFixed(4) + 's</td>'
       + '<td>' + totLat.toFixed(1) + 'ms</td>'
-      + '<td>' + totEnergy.toFixed(6) + 'KJ</td>'
+      + '<td title="compute ' + totCompute.toFixed(6) + ' + network ' + totNetwork.toFixed(6) + '">' + totEnergy.toFixed(6) + 'KJ</td>'
       + '</tr>';
 
     tbody.innerHTML = html;
-    if (subtitle) subtitle.textContent = ids.length + ' client(s) reported';
+    if (subtitle) subtitle.textContent = ids.length + ' client(s) reported · E_total = compute + network';
     sec.style.display = 'block';
   }
 

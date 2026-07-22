@@ -395,7 +395,7 @@ body{color:var(--txt);font-family:var(--disp)}
       <div id="sCliFrames" style="margin-bottom:10px"></div>
       <div style="overflow-x:auto">
         <table class="rtbl">
-          <thead><tr><th>Scheduler</th><th>Compl.Time(s)</th><th>Latency(ms)</th><th>Energy(KJ)</th></tr></thead>
+          <thead><tr><th>Scheduler</th><th>Compl.Time(s)</th><th>Latency(ms)</th><th>E_total(KJ)</th></tr></thead>
           <tbody id="sResTbody"></tbody>
         </table>
       </div>
@@ -489,7 +489,7 @@ body{color:var(--txt);font-family:var(--disp)}
         <div class="sbox"><div class="sl">Frames Done</div><div class="sv g" id="cFrDone">0</div></div>
         <div class="sbox"><div class="sl">Objects Found</div><div class="sv a" id="cObjFnd">0</div></div>
         <div class="sbox"><div class="sl">Avg Latency</div><div class="sv p" id="cAvgLat">0ms</div></div>
-        <div class="sbox"><div class="sl">Energy (KJ)</div><div class="sv b" id="cEnergy">0.000</div></div>
+        <div class="sbox"><div class="sl">E_total (KJ)</div><div class="sv b" id="cEnergy">0.000</div></div>
       </div>
     </div>
 
@@ -550,21 +550,27 @@ var LOG = (function(){
   //   returned:    { sched: count },   // results received back per scheduler
   //   cpuReadings: number[],           // all CPU% samples received from this device
   //   cpuAtDispatch: { sched: [] },    // CPU% of the device at each dispatch moment
-  //   energyKJ:    { sched: number }   // cumulative energy (KJ) per scheduler for this device
+  //   energyKJ:        { sched: number }  // E_total = compute + network
+  //   energyComputeKJ: { sched: number }  // modeled compute (linear-utilization)
+  //   energyNetworkKJ: { sched: number }  // modeled network (tail-energy proxy)
   // }
   var _stats = {};
   var _SCHEDS = ['greedy','pso','mompso','mompso-ga'];
   var _SCHED_NAMES = { greedy:'Greedy', pso:'PSO', mompso:'MOMPSO', 'mompso-ga':'MOMPSO-GA' };
 
+  function _zeroSched(){ return { greedy:0, pso:0, mompso:0, 'mompso-ga':0 }; }
+
   function _ensureDevice(clientId, name){
     if(!_stats[clientId]){
       _stats[clientId] = {
         name: name || clientId,
-        dispatched:    { greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
-        returned:      { greedy:0, pso:0, mompso:0, 'mompso-ga':0 },
-        cpuReadings:   [],
-        cpuAtDispatch: { greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
-        energyKJ:      { greedy:0, pso:0, mompso:0, 'mompso-ga':0 }
+        dispatched:       _zeroSched(),
+        returned:         _zeroSched(),
+        cpuReadings:      [],
+        cpuAtDispatch:    { greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+        energyKJ:         _zeroSched(),
+        energyComputeKJ:  _zeroSched(),
+        energyNetworkKJ:  _zeroSched()
       };
     } else if(name && name !== clientId){
       _stats[clientId].name = name;
@@ -594,12 +600,26 @@ var LOG = (function(){
     if(cpuLoad != null) _stats[clientId].cpuReadings.push(cpuLoad);
   }
 
-  // Called from handleFrame() on CLIENT or onClientResult() on HOST with per-frame energy (KJ).
-  // deviceId = S.myId (client) or clientId (host); name = device name; sched = scheduler name.
-  function trackEnergy(deviceId, name, sched, energyKJ){
+  // Called from handleFrame() on CLIENT or onClientResult() on HOST.
+  // energyOrObj = number (legacy total KJ) OR { totalKJ, computeKJ, networkKJ }.
+  function trackEnergy(deviceId, name, sched, energyOrObj){
     _ensureDevice(deviceId, name);
+    var total = 0, compute = 0, network = 0;
+    if(energyOrObj && typeof energyOrObj === 'object'){
+      total   = +energyOrObj.totalKJ   || 0;
+      compute = +energyOrObj.computeKJ || 0;
+      network = +energyOrObj.networkKJ || 0;
+      if(!total && (compute || network)) total = compute + network;
+    } else {
+      total = +energyOrObj || 0;
+      compute = total; // legacy: treat entire amount as compute
+    }
     if(_stats[deviceId].energyKJ && sched in _stats[deviceId].energyKJ)
-      _stats[deviceId].energyKJ[sched] += energyKJ;
+      _stats[deviceId].energyKJ[sched] += total;
+    if(_stats[deviceId].energyComputeKJ && sched in _stats[deviceId].energyComputeKJ)
+      _stats[deviceId].energyComputeKJ[sched] += compute;
+    if(_stats[deviceId].energyNetworkKJ && sched in _stats[deviceId].energyNetworkKJ)
+      _stats[deviceId].energyNetworkKJ[sched] += network;
   }
 
   function _ts(){ return Date.now() - _t0; }
@@ -803,36 +823,53 @@ var LOG = (function(){
     lines.push('  │  A scheduler that consistently picks high-CPU devices is less efficient.');
     lines.push('  └──────────────────────────────────────────────────────────────');
 
-    // ── 5. Energy consumption by device and scheduler (KJ) ──────
-    lines.push('');
-    lines.push('  ┌─ ENERGY CONSUMPTION (KJ) — PER DEVICE × SCHEDULER ──────────');
-    lines.push('  │  (Energy = device_active_W × latency_s / 1000 · per frame processed)');
-    lines.push('  │  ' + _pad('Device',22) + _SCHEDS.map(function(s){ return _pad(_SCHED_NAMES[s],16); }).join('') + _pad('TOTAL',14));
-    lines.push('  │  ' + '─'.repeat(100));
-    if(!deviceIds.length){
-      lines.push('  │  No energy data recorded.');
-    } else {
-      var schedTotals = { greedy:0, pso:0, mompso:0, 'mompso-ga':0 };
-      deviceIds.forEach(function(id){
-        var d = _stats[id];
-        var rowTotal = 0;
-        var cols = _SCHEDS.map(function(s){
-          var e = (d.energyKJ && d.energyKJ[s]) ? d.energyKJ[s] : 0;
-          rowTotal += e;
-          schedTotals[s] = (schedTotals[s]||0) + e;
+    // ── 5. Energy — E_total = E_compute + E_network (see ENERGY_MODEL.md) ──
+    function _energyMatrix(title, note, field){
+      lines.push('');
+      lines.push('  ┌─ ' + title);
+      lines.push('  │  ' + note);
+      lines.push('  │  ' + _pad('Device',22) + _SCHEDS.map(function(s){ return _pad(_SCHED_NAMES[s],16); }).join('') + _pad('TOTAL',14));
+      lines.push('  │  ' + '─'.repeat(100));
+      if(!deviceIds.length){
+        lines.push('  │  No energy data recorded.');
+      } else {
+        var schedTotals = { greedy:0, pso:0, mompso:0, 'mompso-ga':0 };
+        deviceIds.forEach(function(id){
+          var d = _stats[id];
+          var rowTotal = 0;
+          var cols = _SCHEDS.map(function(s){
+            var e = (d[field] && d[field][s]) ? d[field][s] : 0;
+            rowTotal += e;
+            schedTotals[s] = (schedTotals[s]||0) + e;
+            return _pad(e.toFixed(6)+' KJ', 16);
+          }).join('');
+          lines.push('  │  ' + _pad(d.name,22) + cols + _pad(rowTotal.toFixed(6)+' KJ',14));
+        });
+        lines.push('  │  ' + '─'.repeat(100));
+        var grandTotal = 0;
+        var totCols = _SCHEDS.map(function(s){
+          var e = schedTotals[s]||0; grandTotal += e;
           return _pad(e.toFixed(6)+' KJ', 16);
         }).join('');
-        lines.push('  │  ' + _pad(d.name,22) + cols + _pad(rowTotal.toFixed(6)+' KJ',14));
-      });
-      lines.push('  │  ' + '─'.repeat(100));
-      var grandTotal = 0;
-      var totCols = _SCHEDS.map(function(s){
-        var e = schedTotals[s]||0; grandTotal += e;
-        return _pad(e.toFixed(6)+' KJ', 16);
-      }).join('');
-      lines.push('  │  ' + _pad('TOTAL (all devices)',22) + totCols + _pad(grandTotal.toFixed(6)+' KJ',14));
+        lines.push('  │  ' + _pad('TOTAL (all devices)',22) + totCols + _pad(grandTotal.toFixed(6)+' KJ',14));
+      }
+      lines.push('  └──────────────────────────────────────────────────────────────');
     }
-    lines.push('  └──────────────────────────────────────────────────────────────');
+    _energyMatrix(
+      'E_TOTAL (KJ) — PER DEVICE × SCHEDULER ─────────────────────',
+      '(E_total = E_compute + E_network · hybrid model · ENERGY_MODEL.md)',
+      'energyKJ'
+    );
+    _energyMatrix(
+      'MODELED COMPUTE ENERGY (KJ) — linear-utilization, calibrated ─',
+      '(Fan et al. P(u)=P_idle+(P_max−P_idle)×u · over detectMs · cpuUtil from jank detector)',
+      'energyComputeKJ'
+    );
+    _energyMatrix(
+      'MODELED NETWORK ENERGY (KJ) — tail-energy proxy ─────────────',
+      '(Balasubramanian et al. ramp+transfer+tail per WS message · not bytes×constant)',
+      'energyNetworkKJ'
+    );
 
     lines.push('');
     lines.push(sep);
@@ -1179,15 +1216,30 @@ var RES = (function() {
   var schedData = {};
   var SCHEDS = ['greedy','pso','mompso','mompso-ga'];
 
+  function _empty(){ return { lats:[], energySum:0, computeSum:0, networkSum:0, frames:0 }; }
+
   function clientReset() {
     schedData = {};
-    SCHEDS.forEach(function(s){ schedData[s]={ lats:[], energySum:0, frames:0 }; });
+    SCHEDS.forEach(function(s){ schedData[s]=_empty(); });
   }
 
-  function clientFrame(sched, latMs, energyKJ) {
-    if(!schedData[sched]) schedData[sched]={ lats:[], energySum:0, frames:0 };
+  // energyOrObj = number (total KJ) OR { totalKJ, computeKJ, networkKJ }
+  function clientFrame(sched, latMs, energyOrObj) {
+    if(!schedData[sched]) schedData[sched]=_empty();
     schedData[sched].lats.push(latMs);
-    schedData[sched].energySum += energyKJ;
+    var total=0, compute=0, network=0;
+    if(energyOrObj && typeof energyOrObj === 'object'){
+      total   = +energyOrObj.totalKJ   || 0;
+      compute = +energyOrObj.computeKJ || 0;
+      network = +energyOrObj.networkKJ || 0;
+      if(!total && (compute || network)) total = compute + network;
+    } else {
+      total = +energyOrObj || 0;
+      compute = total;
+    }
+    schedData[sched].energySum  += total;
+    schedData[sched].computeSum += compute;
+    schedData[sched].networkSum += network;
     schedData[sched].frames++;
   }
 
@@ -1199,8 +1251,15 @@ var RES = (function() {
       if(!d || d.frames === 0) return;
       var sumLat = 0;
       for(var i=0;i<d.lats.length;i++) sumLat += d.lats[i];
-      var avgLat    = sumLat / d.lats.length;
-      payload[sched] = { avgLat: avgLat, avgTime: avgLat/1000, avgEnergy: d.energySum/d.frames, frames: d.frames };
+      var avgLat = sumLat / d.lats.length;
+      payload[sched] = {
+        avgLat: avgLat,
+        avgTime: avgLat/1000,
+        avgEnergy: d.energySum/d.frames,
+        avgCompute: d.computeSum/d.frames,
+        avgNetwork: d.networkSum/d.frames,
+        frames: d.frames
+      };
       hasAny = true;
     });
     if(!hasAny) return;
@@ -1225,35 +1284,38 @@ var RES = (function() {
     if(!ids.length) return;
     var NAMES  = { greedy:'Greedy', pso:'PSO', mompso:'MOMPSO', 'mompso-ga':'MOMPSO-GA' };
     var COLORS = { greedy:'g', pso:'b', mompso:'p', 'mompso-ga':'a' };
-    var html = '', totTime=0, totLat=0, totEnergy=0, schedCount=0;
+    var html = '', totTime=0, totLat=0, totEnergy=0, totCompute=0, totNetwork=0, schedCount=0;
     SCHEDS.forEach(function(sched){
-      var sumTime=0, sumLat=0, sumEnergy=0, found=false;
+      var sumTime=0, sumLat=0, sumEnergy=0, sumCompute=0, sumNetwork=0, found=false;
       ids.forEach(function(cid){
         var d = clientResults[cid] && clientResults[cid][sched];
         if(d && d.frames > 0){
-          sumTime   += d.avgTime;
-          sumLat    += d.avgLat;
-          sumEnergy += d.avgEnergy;
+          sumTime    += d.avgTime;
+          sumLat     += d.avgLat;
+          sumEnergy  += d.avgEnergy;
+          sumCompute += (d.avgCompute != null ? d.avgCompute : d.avgEnergy);
+          sumNetwork += (d.avgNetwork != null ? d.avgNetwork : 0);
           found = true;
         }
       });
       if(!found) return;
-      totTime+=sumTime; totLat+=sumLat; totEnergy+=sumEnergy; schedCount++;
+      totTime+=sumTime; totLat+=sumLat; totEnergy+=sumEnergy;
+      totCompute+=sumCompute; totNetwork+=sumNetwork; schedCount++;
       html += '<tr>'
         +'<td class="'+COLORS[sched]+'">'+NAMES[sched]+'</td>'
         +'<td class="bld">'+sumTime.toFixed(4)+'s</td>'
         +'<td>'+sumLat.toFixed(1)+'ms</td>'
-        +'<td>'+sumEnergy.toFixed(6)+'KJ</td>'
+        +'<td title="compute '+sumCompute.toFixed(6)+' + network '+sumNetwork.toFixed(6)+'">'+sumEnergy.toFixed(6)+'KJ</td>'
         +'</tr>';
     });
     if(!schedCount) return;
     html += '<tr class="tot"><td>TOTAL</td>'
       +'<td>'+totTime.toFixed(4)+'s</td>'
       +'<td>'+totLat.toFixed(1)+'ms</td>'
-      +'<td>'+totEnergy.toFixed(6)+'KJ</td>'
+      +'<td title="compute '+totCompute.toFixed(6)+' + network '+totNetwork.toFixed(6)+'">'+totEnergy.toFixed(6)+'KJ</td>'
       +'</tr>';
     tbody.innerHTML = html;
-    if(sub) sub.textContent = ids.length+' client(s) reported';
+    if(sub) sub.textContent = ids.length+' client(s) reported · E_total = compute + network';
     sec.style.display = 'block';
   }
 
@@ -1278,37 +1340,190 @@ var RES = (function() {
 
 const WS_URL = 'wss://detectnet-1.onrender.com';
 
-// Device power model (W active inference). Battery Status API has no wattage.
-// Energy_KJ = activeW × execution_time_s / 1000
+// ══════════════════════════════════════════════════════════════════
+//  HYBRID ENERGY MODEL
+//  Compute : Fan et al. (ISCA 2007) linear utilization — PureEdgeSim /
+//            CloudSim / GreenCloud standard
+//            P(u) = P_idle + (P_max − P_idle) × u
+//  Network : Balasubramanian et al. (IMC 2009) tail-energy proxy —
+//            per-message ramp + transfer + tail state machine
+//  Calibration : Zhang et al. PowerTutor-style — scale P_idle/P_max from
+//            Battery Status API Δlevel × ratedCapacityWh when available
+//  See ENERGY_MODEL.md for full methodology & citations.
+// ══════════════════════════════════════════════════════════════════
+// Priors: idleW / maxW (watts). capacityWh ≈ rated battery energy.
+// maxW ≈ peak SoC draw under inference; idleW ≈ screen-on baseline.
 const DEVICE_POWER_TABLE = [
-  { match: /pixel\s*8a/i,              activeW: 3.8 },
-  { match: /pixel\s*8/i,               activeW: 4.0 },
-  { match: /pixel\s*7/i,               activeW: 4.0 },
-  { match: /pixel/i,                   activeW: 3.9 },
-  { match: /galaxy\s*a14|sm-a14|samsung.*a14/i, activeW: 4.2 },
-  { match: /galaxy\s*a5[0-9]|sm-a5/i,  activeW: 4.5 },
-  { match: /galaxy\s*s2[3-5]|sm-s9/i,  activeW: 5.5 },
-  { match: /samsung|galaxy/i,          activeW: 4.3 },
-  { match: /redmi|xiaomi|poco/i,       activeW: 4.0 },
-  { match: /oneplus|oppo|vivo|realme/i, activeW: 4.1 },
-  { match: /lava/i,                    activeW: 3.5 },
-  { match: /iphone\s*1[5-6]/i,         activeW: 4.8 },
-  { match: /iphone\s*1[3-4]/i,         activeW: 4.5 },
-  { match: /iphone|ipad/i,             activeW: 4.0 },
-  { match: /android/i,                 activeW: 4.0 },
-  { match: /windows|mac|linux|desktop/i, activeW: 15.0 },
+  { match: /pixel\s*8a/i,              idleW: 1.3, maxW: 4.4, capacityWh: 16.6 },
+  { match: /pixel\s*8/i,               idleW: 1.4, maxW: 4.6, capacityWh: 17.0 },
+  { match: /pixel\s*7/i,               idleW: 1.4, maxW: 4.6, capacityWh: 16.1 },
+  { match: /pixel/i,                   idleW: 1.35,maxW: 4.5, capacityWh: 15.5 },
+  { match: /galaxy\s*a14|sm-a14|samsung.*a14/i, idleW: 1.5, maxW: 4.8, capacityWh: 18.5 },
+  { match: /galaxy\s*a5[0-9]|sm-a5/i,  idleW: 1.6, maxW: 5.2, capacityWh: 18.5 },
+  { match: /galaxy\s*s2[3-5]|sm-s9/i,  idleW: 1.9, maxW: 6.3, capacityWh: 18.0 },
+  { match: /samsung|galaxy/i,          idleW: 1.5, maxW: 4.9, capacityWh: 17.0 },
+  { match: /redmi|xiaomi|poco/i,       idleW: 1.4, maxW: 4.6, capacityWh: 18.5 },
+  { match: /oneplus|oppo|vivo|realme/i, idleW: 1.4, maxW: 4.7, capacityWh: 18.0 },
+  { match: /lava/i,                    idleW: 1.2, maxW: 4.0, capacityWh: 14.0 },
+  { match: /iphone\s*1[5-6]/i,         idleW: 1.7, maxW: 5.5, capacityWh: 13.0 },
+  { match: /iphone\s*1[3-4]/i,         idleW: 1.6, maxW: 5.2, capacityWh: 12.0 },
+  { match: /iphone|ipad/i,             idleW: 1.4, maxW: 4.6, capacityWh: 12.0 },
+  { match: /android/i,                 idleW: 1.4, maxW: 4.6, capacityWh: 15.0 },
+  { match: /windows|mac|linux|desktop/i, idleW: 8.0, maxW: 45.0, capacityWh: 0 },
 ];
-const DEFAULT_PHONE_W = 4.0;
+const DEFAULT_PHONE_IDLE_W = 1.4;
+const DEFAULT_PHONE_MAX_W  = 4.6;
+const DEFAULT_PHONE_CAP_WH = 15.0;
+const DEFAULT_PHONE_W = 4.0; // mid-load fallback for legacy powerW display
 
-function lookupDevicePowerW(deviceName){
-  const hay = ((deviceName || '') + ' ' + (typeof navigator !== 'undefined' ? navigator.userAgent : '')).toLowerCase();
-  for(let i=0;i<DEVICE_POWER_TABLE.length;i++){
-    if(DEVICE_POWER_TABLE[i].match.test(hay)) return DEVICE_POWER_TABLE[i].activeW;
-  }
-  return DEFAULT_PHONE_W;
+function _deviceHay(deviceName){
+  return ((deviceName || '') + ' ' + (typeof navigator !== 'undefined' ? navigator.userAgent : '')).toLowerCase();
 }
 
-// Energy in kilojoules: P(W) × t(s) / 1000
+function lookupPowerModel(deviceName){
+  const hay = _deviceHay(deviceName);
+  for(let i=0;i<DEVICE_POWER_TABLE.length;i++){
+    if(DEVICE_POWER_TABLE[i].match.test(hay)){
+      const r = DEVICE_POWER_TABLE[i];
+      return { idleW: r.idleW, maxW: r.maxW, capacityWh: r.capacityWh || DEFAULT_PHONE_CAP_WH };
+    }
+  }
+  return { idleW: DEFAULT_PHONE_IDLE_W, maxW: DEFAULT_PHONE_MAX_W, capacityWh: DEFAULT_PHONE_CAP_WH };
+}
+
+// Effective mid-load watts (u≈0.7) — used for UI / legacy powerW display only
+function lookupDevicePowerW(deviceName){
+  const m = lookupPowerModel(deviceName);
+  return +(m.idleW + (m.maxW - m.idleW) * 0.7).toFixed(2);
+}
+
+// Radio tail-energy coefficients (Joules per phase). Tail dominates for small msgs.
+// WiFi vs cellular from Balasubramanian et al. IMC 2009 (simplified proxy).
+const RADIO_TAIL = {
+  wifi:  { rampJ: 0.005, xferJ: 0.002, tailJ: 0.015, tailMs: 200  },
+  cell:  { rampJ: 0.025, xferJ: 0.008, tailJ: 0.120, tailMs: 4000 },
+  other: { rampJ: 0.010, xferJ: 0.004, tailJ: 0.040, tailMs: 1000 }
+};
+
+const ENERGY = {
+  // Live calibrated (or prior) wattage
+  pIdle: DEFAULT_PHONE_IDLE_W,
+  pMax:  DEFAULT_PHONE_MAX_W,
+  capacityWh: DEFAULT_PHONE_CAP_WH,
+  calibrated: false,
+  // Battery calibration window
+  batStartLevel: null, // 0..1
+  batStartMs: null,
+  utilSum: 0,
+  utilN: 0,
+  modeledJAccum: 0,    // Σ modeled compute+network Joules in window
+  // Radio state machine
+  lastMsgMs: 0,
+  radioProfile: 'other',
+
+  init(deviceName){
+    const m = lookupPowerModel(deviceName);
+    this.pIdle = m.idleW;
+    this.pMax  = m.maxW;
+    this.capacityWh = (typeof S !== 'undefined' && S.batteryCapacityWh > 0)
+      ? S.batteryCapacityWh : m.capacityWh;
+    this.calibrated = false;
+    this.radioProfile = this._detectRadio();
+    this.beginSession();
+  },
+
+  _detectRadio(){
+    const nc = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
+    const t = (nc && (nc.type || nc.effectiveType) || '').toLowerCase();
+    if(t === 'wifi' || t === 'ethernet') return 'wifi';
+    if(/4g|3g|2g|cellular|wimax/.test(t)) return 'cell';
+    // Android Chrome often reports effectiveType only (4g) even on WiFi — prefer type
+    if(nc && nc.effectiveType && !nc.type) return 'cell';
+    return 'other';
+  },
+
+  beginSession(){
+    this.batStartMs = Date.now();
+    this.batStartLevel = (typeof HD !== 'undefined' && HD.batterySupported && HD.battery >= 0)
+      ? HD.battery / 100 : null;
+    this.utilSum = 0; this.utilN = 0; this.modeledJAccum = 0;
+    this.lastMsgMs = 0;
+    this.calibrated = false;
+  },
+
+  // Fan et al. linear model over the isolated detectMs window
+  computeEnergyKJ(detectMs, cpuUtil01){
+    const u = Math.max(0, Math.min(1, cpuUtil01 == null ? 0.5 : cpuUtil01));
+    const P = this.pIdle + (this.pMax - this.pIdle) * u;
+    const joules = P * (Math.max(0, detectMs) / 1000);
+    this.utilSum += u; this.utilN++;
+    this.modeledJAccum += joules;
+    return joules / 1000; // KJ
+  },
+
+  // Tail-energy proxy: full ramp+xfer+tail if radio was idle; xfer-only if still in tail
+  networkEnergyKJ(nowMs){
+    const now = nowMs || Date.now();
+    const coef = RADIO_TAIL[this.radioProfile] || RADIO_TAIL.other;
+    let joules;
+    if(!this.lastMsgMs || (now - this.lastMsgMs) > coef.tailMs){
+      joules = coef.rampJ + coef.xferJ + coef.tailJ; // new high-power cycle
+    } else {
+      joules = coef.xferJ; // still in tail — only transfer cost; extends tail
+    }
+    this.lastMsgMs = now;
+    this.modeledJAccum += joules;
+    return joules / 1000; // KJ
+  },
+
+  // Per-frame bundle: RX frame + TX result → 2 radio events; compute over detectMs
+  frameEnergy(detectMs, cpuUtil01){
+    const computeKJ = this.computeEnergyKJ(detectMs, cpuUtil01);
+    const netRxKJ   = this.networkEnergyKJ();
+    const netTxKJ   = this.networkEnergyKJ();
+    const networkKJ = netRxKJ + netTxKJ;
+    return {
+      computeKJ: computeKJ,
+      networkKJ: networkKJ,
+      totalKJ:   computeKJ + networkKJ,
+      cpuUtil:   Math.max(0, Math.min(1, cpuUtil01 == null ? 0.5 : cpuUtil01)),
+      detectMs:  detectMs,
+      pIdle:     this.pIdle,
+      pMax:      this.pMax,
+      calibrated: this.calibrated,
+      radio:     this.radioProfile
+    };
+  },
+
+  // Zhang / PowerTutor-style: fit scale from measured battery drain vs modeled Joules
+  tryCalibrate(){
+    if(this.batStartLevel == null || typeof HD === 'undefined' || !HD.batterySupported) return false;
+    if(this.capacityWh <= 0) return false;
+    const levelNow = HD.battery / 100;
+    const dLevel = this.batStartLevel - levelNow; // fraction drained
+    if(dLevel < 0.01) return false; // need ≥1% drain for a usable sample
+    const dtH = (Date.now() - this.batStartMs) / 3600000;
+    if(dtH <= 0) return false;
+    const measuredWh = dLevel * this.capacityWh;
+    const measuredAvgW = measuredWh / dtH;
+    const uAvg = this.utilN > 0 ? (this.utilSum / this.utilN) : 0.5;
+    const predictedAvgW = this.pIdle + (this.pMax - this.pIdle) * uAvg;
+    if(predictedAvgW <= 0.05) return false;
+    const scale = measuredAvgW / predictedAvgW;
+    // Clamp scale so a bad Battery API reading can't explode the model
+    const s = Math.max(0.25, Math.min(4.0, scale));
+    this.pIdle *= s;
+    this.pMax  *= s;
+    this.calibrated = true;
+    // Reset window so next fit uses fresh Δ
+    this.batStartLevel = levelNow;
+    this.batStartMs = Date.now();
+    this.utilSum = 0; this.utilN = 0; this.modeledJAccum = 0;
+    return true;
+  }
+};
+
+// Legacy helper — prefer ENERGY.frameEnergy(). Kept for any mid-load × time estimates.
 function calcFrameEnergyKJ(latencyMs, deviceName){
   const W = lookupDevicePowerW(deviceName);
   return (W * (latencyMs / 1000)) / 1000;
@@ -1345,7 +1560,7 @@ const S = {
   clientResultsReceived: new Set(),
   // client side
   model:null, modelOk:false,
-  frDone:0, objFound:0, cliLats:[], cliEnergySum:0, cliStart:0,
+  frDone:0, objFound:0, cliLats:[], cliEnergySum:0, cliComputeSum:0, cliNetworkSum:0, cliStart:0,
   // per-scheduler tracking on client: { schedName: { lats:[], energySum, frames } }
   schedData:{},
   healthTimer:null,
@@ -1494,6 +1709,7 @@ function experimentReset(){
     cli.pend   = 0;
     cli.dispatchedFrames = 0;
     cli.schedLats = { greedy:[], pso:[], mompso:[], 'mompso-ga':[] };
+    cli.schedEnergy = {};
     cli.tsMap  = {};
   });
   S.leftClients = {};
@@ -1525,9 +1741,12 @@ function clientExperimentReset(expId){
   S.objFound     = 0;
   S.cliLats      = [];
   S.cliEnergySum = 0;
+  S.cliComputeSum = 0;
+  S.cliNetworkSum = 0;
   S.cliStart     = Date.now();
   RES.clientReset();
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
+  if(typeof ENERGY !== 'undefined') ENERGY.beginSession();
 
   // Reset UI
   $('cFrDone').textContent = '0';
@@ -1800,6 +2019,7 @@ function onClientJoined(clientId, ip, deviceInfo){
     frameQuota: S.defaultFrameQuota || 0,
     powerW: lookupDevicePowerW(devTag),
     schedLats:{ greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+    schedEnergy:{},
     tsMap:{}
   };
   updateCliCount(); addClientUI(clientId);
@@ -1850,6 +2070,7 @@ function onClientReconnect(clientId, ip, deviceInfo){
     frameQuota: (snap && snap.frameQuota != null) ? snap.frameQuota : (S.defaultFrameQuota || 0),
     powerW: (snap && snap.powerW) || lookupDevicePowerW(devTag),
     schedLats: (snap && snap.schedLats) || { greedy:[], pso:[], mompso:[], 'mompso-ga':[] },
+    schedEnergy: (snap && snap.schedEnergy) || {},
     tsMap: {} // pending were already reassigned on leave
   };
 
@@ -1963,6 +2184,7 @@ function onClientDrop(clientId){
         mompso: (cli.schedLats.mompso||[]).slice(),
         'mompso-ga': (cli.schedLats['mompso-ga']||[]).slice()
       },
+      schedEnergy: cli.schedEnergy ? JSON.parse(JSON.stringify(cli.schedEnergy)) : {},
       leftAt: Date.now()
     };
   }
@@ -2016,9 +2238,20 @@ function onClientResult(clientId, msg){
   // Track successful return in LOG analytics
   LOG.trackResult(clientId, sched);
 
-  // Track energy using device power model (not Battery API — that has no wattage)
-  const frameEnergy = calcFrameEnergyKJ(lat, cli.name);
+  // Prefer client-reported hybrid energy (compute + network); fall back to prior mid-load × RTT
+  var frameEnergy;
+  if(msg.energy && typeof msg.energy === 'object'){
+    frameEnergy = msg.energy;
+  } else {
+    frameEnergy = { totalKJ: calcFrameEnergyKJ(lat, cli.name), computeKJ: calcFrameEnergyKJ(lat, cli.name), networkKJ: 0 };
+  }
   LOG.trackEnergy(clientId, cli.name, sched, frameEnergy);
+  if(!cli.schedEnergy) cli.schedEnergy = {};
+  if(!cli.schedEnergy[sched]) cli.schedEnergy[sched] = { total:0, compute:0, network:0, n:0 };
+  cli.schedEnergy[sched].total   += (+frameEnergy.totalKJ || 0);
+  cli.schedEnergy[sched].compute += (+frameEnergy.computeKJ || 0);
+  cli.schedEnergy[sched].network += (+frameEnergy.networkKJ || 0);
+  cli.schedEnergy[sched].n++;
 
   // Per-frame structured log
   LOG.event('RESULT_OK', {
@@ -2029,6 +2262,9 @@ function onClientResult(clientId, msg){
     dets:     dets.length,
     pend:     cli.pend,
     totalFrames: S.sent,
+    energyKJ: (+frameEnergy.totalKJ || 0).toFixed(8),
+    computeKJ:(+frameEnergy.computeKJ || 0).toFixed(8),
+    networkKJ:(+frameEnergy.networkKJ || 0).toFixed(8),
     ts:       msg.ts
   });
 
@@ -2097,27 +2333,42 @@ function renderFinalResults(){
 
   SCHEDS.forEach(function(sched){
     // sum of per-client averages for this scheduler
-    let sumLat=0, found=false;
+    let sumLat=0, sumE=0, sumC=0, sumN=0, found=false, eCount=0;
     cids.forEach(function(cid){
       const lats = S.clients[cid].schedLats[sched];
       if(!lats || !lats.length) return;
       let s=0; for(let i=0;i<lats.length;i++) s+=lats[i];
       sumLat += s/lats.length;
       found = true;
-    });
-    if(!found) return;
-    // Mean device power across clients that contributed to this scheduler
-    let sumW=0, wCount=0;
-    cids.forEach(function(cid){
-      const c=S.clients[cid];
-      if(c.schedLats[sched] && c.schedLats[sched].length){
-        sumW += c.powerW || lookupDevicePowerW(c.name);
-        wCount++;
+      const se = S.clients[cid].schedEnergy && S.clients[cid].schedEnergy[sched];
+      if(se && se.n > 0){
+        sumE += se.total / se.n;
+        sumC += se.compute / se.n;
+        sumN += se.network / se.n;
+        eCount++;
       }
     });
-    const avgW = wCount ? sumW/wCount : DEFAULT_PHONE_W;
-    const avgTime   = sumLat/1000;
-    const avgEnergy = (avgW * avgTime) / 1000;
+    if(!found) return;
+    const avgTime = sumLat/1000;
+    // Prefer hybrid client-reported energy; fall back to mid-load × RTT if none yet
+    let avgEnergy, avgCompute, avgNetwork;
+    if(eCount > 0){
+      avgEnergy  = sumE;
+      avgCompute = sumC;
+      avgNetwork = sumN;
+    } else {
+      let sumW=0, wCount=0;
+      cids.forEach(function(cid){
+        const c=S.clients[cid];
+        if(c.schedLats[sched] && c.schedLats[sched].length){
+          sumW += c.powerW || lookupDevicePowerW(c.name);
+          wCount++;
+        }
+      });
+      const avgW = wCount ? sumW/wCount : DEFAULT_PHONE_W;
+      avgEnergy = (avgW * avgTime) / 1000;
+      avgCompute = avgEnergy; avgNetwork = 0;
+    }
     totTime   += avgTime;
     totLat    += sumLat;
     totEnergy += avgEnergy;
@@ -2126,7 +2377,7 @@ function renderFinalResults(){
       +'<td class="'+COLORS[sched]+'">'+SCHED_NAMES[sched]+'</td>'
       +'<td class="bld">'+avgTime.toFixed(4)+'s</td>'
       +'<td>'+sumLat.toFixed(1)+'ms</td>'
-      +'<td>'+avgEnergy.toFixed(6)+'KJ</td>'
+      +'<td title="compute '+avgCompute.toFixed(6)+' + network '+avgNetwork.toFixed(6)+'">'+avgEnergy.toFixed(6)+'KJ</td>'
       +'</tr>';
   });
 
@@ -2139,7 +2390,7 @@ function renderFinalResults(){
     +'</tr>';
 
   tbody.innerHTML = html;
-  if(sub) sub.textContent = cids.length+' client(s) · live';
+  if(sub) sub.textContent = cids.length+' client(s) · live · E_total = compute + network';
 
   // per-client frame breakdown
   const cliFramesEl = document.getElementById('sCliFrames');
@@ -2300,6 +2551,7 @@ async function initClient(){
   RES.clientReset();
   SCHEDS.forEach(s=>{ S.schedData[s]={ lats:[], energySum:0, frames:0 }; });
   startHealthReporting();
+  ENERGY.init(S.deviceName || getDeviceInfo());
   // Show current device name in the code card
   const tag = $('cliNameTag');
   if(tag) tag.textContent = S.deviceName || '';
@@ -2400,7 +2652,8 @@ function joinSession(){
         $('cStatSec').style.display='block';
         $('cDetSec').style.display='block';
         $('cNetCard').style.display='block';
-        S.cliStart=Date.now(); S.cliEnergySum=0;
+        S.cliStart=Date.now(); S.cliEnergySum=0; S.cliComputeSum=0; S.cliNetworkSum=0;
+        if(typeof ENERGY !== 'undefined') ENERGY.beginSession();
         setStatus('c', msg.reconnected ? 'Reconnected — receiving frames' : 'Connected — receiving frames','g');
         toast(msg.reconnected ? 'Reconnected! Session state restored' : 'Connected! Waiting for frames...');
         updateHealth();
@@ -2469,31 +2722,41 @@ async function handleFrame(data){
     }
     const detectMs = Date.now() - detectStart;
 
-    // ── Per-frame metrics (device power model, not Battery API) ─
-    const lat         = Date.now()-data.ts;          // ms
-    const frameEnergy = calcFrameEnergyKJ(lat, S.deviceName || getDeviceInfo());
+    // ── Hybrid energy: Fan linear compute (detectMs × cpuUtil) + tail-energy network ─
+    const lat = Date.now()-data.ts;
+    const cpuUtil01 = (typeof HD !== 'undefined' && HD.cpu != null) ? (HD.cpu / 100) : 0.5;
+    ENERGY.tryCalibrate(); // scale P_idle/P_max if ≥1% battery drain observed
+    const e = ENERGY.frameEnergy(detectMs, cpuUtil01);
 
     // Accumulate into per-scheduler buckets (via RES module)
-    RES.clientFrame(sched, lat, frameEnergy);
+    RES.clientFrame(sched, lat, e);
 
     // Track energy in LOG analytics (for export summary)
-    LOG.trackEnergy(S.myId, S.deviceName || getDeviceInfo(), sched, frameEnergy);
+    LOG.trackEnergy(S.myId, S.deviceName || getDeviceInfo(), sched, e);
 
     // Overall client counters (for display only)
     S.frDone++; S.objFound+=dets.length; S.cliLats.push(lat);
-    S.cliEnergySum=(S.cliEnergySum||0)+frameEnergy;
+    S.cliEnergySum=(S.cliEnergySum||0)+e.totalKJ;
+    S.cliComputeSum=(S.cliComputeSum||0)+e.computeKJ;
+    S.cliNetworkSum=(S.cliNetworkSum||0)+e.networkKJ;
 
     // Per-frame structured log entry
     LOG.event('DETECT_DONE', {
-      frame:    frameNum,
-      sched:    sched,
-      latMs:    lat,
-      detectMs: detectMs,
-      dets:     dets.length,
-      classes:  dets.slice(0,4).map(d=>d.class).join(',') || 'none',
-      energyKJ: frameEnergy.toFixed(8),
-      powerW:   lookupDevicePowerW(S.deviceName || getDeviceInfo()),
-      ts:       data.ts
+      frame:     frameNum,
+      sched:     sched,
+      latMs:     lat,
+      detectMs:  detectMs,
+      dets:      dets.length,
+      classes:   dets.slice(0,4).map(d=>d.class).join(',') || 'none',
+      energyKJ:  e.totalKJ.toFixed(8),
+      computeKJ: e.computeKJ.toFixed(8),
+      networkKJ: e.networkKJ.toFixed(8),
+      cpuUtil:   e.cpuUtil.toFixed(3),
+      pIdle:     e.pIdle.toFixed(3),
+      pMax:      e.pMax.toFixed(3),
+      calibrated:e.calibrated ? 1 : 0,
+      radio:     e.radio,
+      ts:        data.ts
     });
 
     // Draw boxes
@@ -2512,10 +2775,12 @@ async function handleFrame(data){
     $('cAvgLat').textContent=avgLat+'ms'; $('cEnergy').textContent=avgEnergy.toFixed(6);
     renderCliDets(dets);
 
-    // Send raw result back to host (for detection overlay + cluster stats)
+    // Send raw result back to host (include energy breakdown for host aggregation)
     wsSend({ type:'result', code:S.code, clientId:S.myId,
       data:{ ts:data.ts, fw:img.width, fh:img.height, sched,
-             dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})) } });
+             dets:dets.map(d=>({class:d.class,score:d.score,bbox:d.bbox})),
+             energy: { totalKJ:e.totalKJ, computeKJ:e.computeKJ, networkKJ:e.networkKJ,
+                       cpuUtil:e.cpuUtil, detectMs:e.detectMs, calibrated:e.calibrated } } });
 
     // Health + sched averages sent on fixed interval — not every frame
   };
@@ -2542,7 +2807,14 @@ async function initBattery(){
   try{
     const b = await navigator.getBattery();
     HD.batterySupported = true;
-    const read = ()=>{ HD.battery = Math.round(b.level*100); };
+    const read = ()=>{
+      HD.battery = Math.round(b.level*100);
+      // Anchor calibration window once Battery API is ready
+      if(typeof ENERGY !== 'undefined' && ENERGY.batStartLevel == null){
+        ENERGY.batStartLevel = b.level;
+        ENERGY.batStartMs = Date.now();
+      }
+    };
     read();
     b.addEventListener('levelchange', read);
     b.addEventListener('chargingchange', read);

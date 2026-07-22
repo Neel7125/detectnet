@@ -207,7 +207,7 @@ wss.on('connection', (ws) => {
       const session = sessions.get(ws._code);
       if (!session || ws._role !== 'client') return;
       const d = data || {};
-      send(session.hostWs, { type: 'result', from: ws._id, ts: d.ts, dets: d.dets, fw: d.fw, fh: d.fh, sched: d.sched });
+      send(session.hostWs, { type: 'result', from: ws._id, ts: d.ts, dets: d.dets, fw: d.fw, fh: d.fh, sched: d.sched, energy: d.energy });
       if (session.stats) session.stats.resultsReceived++;
       log('CLIENT', ws._code, 'RESULT_RELAYED', {
         from:    ws._id,
